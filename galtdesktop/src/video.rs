@@ -29,7 +29,7 @@ pub struct VideoUnderlay {
 }
 
 impl VideoUnderlay {
-    pub fn new(gl: glow::Context, proc_addr_ctx: *mut c_void, file: &str, wh: (f32, f32)) -> Self {
+    pub fn new(gl: glow::Context, proc_addr_ctx: *mut c_void, wh: (f32, f32)) -> Self {
         let mut mpv = Mpv::new().expect("Error while creating MPV");
         let render_ctx = RenderContext::new(
             unsafe { mpv.ctx.as_mut() },
@@ -44,10 +44,15 @@ impl VideoUnderlay {
         .expect("Failed creating render context");
 
         mpv.event_context_mut().disable_deprecated_events().unwrap();
-        mpv.playlist_load_files(&[(file, FileState::AppendPlay, None)])
-            .unwrap();
+
 
         Self::init_gl(gl, wh, mpv, render_ctx)
+    }
+
+    pub fn replace_play(&self, video: String) {
+        self.mpv
+            .playlist_load_files(&[(&video, FileState::Replace, None)])
+            .expect("to append");
     }
 
     fn init_gl(
@@ -190,11 +195,11 @@ impl VideoUnderlay {
     }
 
     pub fn pause(&self) {
-        self.mpv.pause();
+        self.mpv.pause().expect("to pause");
     }
 
     pub fn play(&self) {
-        self.mpv.unpause();
+        self.mpv.unpause().expect("to play");
     }
 
     pub fn get_position(&self) -> Option<i64> {

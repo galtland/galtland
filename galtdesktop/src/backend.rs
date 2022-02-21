@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use clap::Parser;
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::daemons::{self, rtmp_server};
@@ -114,19 +113,24 @@ pub async fn start_command(opt: StartOpt) -> anyhow::Result<()> {
         gossip_listener_client.clone(),
     ));
 
-    let mut discover_tick = tokio::time::interval(Duration::from_secs(30));
-    loop {
-        log::trace!("Looping main loop");
-        tokio::task::yield_now().await;
-        tokio::select! {
-            _ = discover_tick.tick() => {
-                 protocols::handle_discover_tick(&configuration, &mut swarm)
-            },
-            command = network_backend_command_receiver.recv() => match command {
-                Some(e) => protocols::handle_network_backend_command(e, &mut swarm),
-                None => todo!(),
-            },
-            event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
-        };
-    }
+    utils::spawn_and_log_error({
+        let mut discover_tick = tokio::time::interval(Duration::from_secs(30));
+        async move {
+            loop {
+                log::trace!("Looping main loop");
+                tokio::task::yield_now().await;
+                tokio::select! {
+                    _ = discover_tick.tick() => {
+                        protocols::handle_discover_tick(&configuration, &mut swarm)
+                    },
+                    command = network_backend_command_receiver.recv() => match command {
+                        Some(e) => protocols::handle_network_backend_command(e, &mut swarm),
+                        None => todo!(),
+                    },
+                    event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
+                };
+            }
+        }
+    });
+    Ok(())
 }

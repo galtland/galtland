@@ -3,7 +3,6 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use clap::{Parser, Subcommand};
-use galtcore::libp2p::futures::StreamExt;
 use galtcore::libp2p::Multiaddr;
 use galtcore::tokio;
 
@@ -18,17 +17,17 @@ async fn main() -> anyhow::Result<()> {
     human_panic::setup_panic!();
     pretty_env_logger::init_timed();
     let cli = Cli::parse();
-    let (h, rtmp_listen_address) = match cli.command {
+    let rtmp_listen_address = match cli.command {
         MainCommands::Start(opt) => {
             let rtmp_listen_address = opt.rtmp_listen_address;
-            let h = galtcore::utils::spawn_and_log_error(backend::start_command(opt));
-            (h, rtmp_listen_address)
+            backend::start_command(opt).await?;
+            rtmp_listen_address
         }
     };
 
-    gui::run_gui(format!("rtmp://{}/", rtmp_listen_address));
+    gui::run_gui(rtmp_listen_address.to_string());
 
-    Ok(h.await?)
+    Ok(())
 }
 
 #[derive(Parser)]

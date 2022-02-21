@@ -1,14 +1,12 @@
-// Copyright © SixtyFPS GmbH <info@slint-ui.com>
-// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-commercial
-
 import { ScrollView, Button, CheckBox, SpinBox, Slider, GroupBox, LineEdit, StandardListView,
     ComboBox, HorizontalBox, VerticalBox, GridBox, TabWidget, TextEdit, Slider } from "std-widgets.slint";
 
 App := Window {
     preferred-width: 1000px;
     preferred-height: 1000px;
-    title: "Slint MPV";
-    icon: @image-url("../../logo/slint-logo-small-light-128x128.png");
+    title: "galtland";
+
+    callback stream_id_input(string);
 
     property window_width <=> width;
     property window_height <=> height;
@@ -26,6 +24,19 @@ App := Window {
         Rectangle {
             background: #ffffffaa;
             height: 50px;
+            GroupBox {
+                title: "Stream view";
+                text_stream_id := LineEdit {
+                    placeholder-text: "Enter a stream id (e.g live/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN)";
+                    accepted(text) => { stream_id_input(text); }
+                }
+                Button {
+                    text: "Go";
+                    clicked => {
+                        stream_id_input(text_stream_id.text);
+                    }
+                }
+            }
         }
 
         Rectangle {
