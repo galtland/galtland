@@ -4,8 +4,6 @@ icon.png
 
 *.AppImage
 
-*.svg
-
 perf.data*
 
 *.db*
