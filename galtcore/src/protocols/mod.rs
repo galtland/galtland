@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 pub mod gossip;
 pub mod kademlia_record;
 pub mod payment_info;

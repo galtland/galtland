@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
 use libp2p::core::PublicKey;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use std::time::Duration;
 
 use libp2p::gossipsub::{self, MessageAuthenticity, ValidationMode};

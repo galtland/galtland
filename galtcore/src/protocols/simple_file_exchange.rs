@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use async_trait::async_trait;
 use libp2p::core::upgrade::{
     read_length_prefixed, read_varint, write_length_prefixed, write_varint,

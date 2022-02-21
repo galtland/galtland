@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 pub mod payment_info;
 pub mod rtmp;
 pub mod simple_file;

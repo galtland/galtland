@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::rtmp::handlers::RespondPaymentInfo;
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::payment_info::models::PaymentInfo;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use libp2p::Multiaddr;
 
 pub fn get_official_rendezvous() -> Vec<Multiaddr> {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use libp2p::request_response::{RequestResponseEvent, RequestResponseMessage};
 use libp2p::Swarm;
 use log::{debug, warn};

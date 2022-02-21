@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
 

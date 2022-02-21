@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use std::mem::transmute;
 use std::os::raw::c_void;
 

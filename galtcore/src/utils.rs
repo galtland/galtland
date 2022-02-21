@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use std::io;
 use std::str::Utf8Error;
 use std::time::SystemTime;

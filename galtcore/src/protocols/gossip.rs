@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use libp2p::gossipsub::{GossipsubEvent, IdentTopic, Topic};
 use libp2p::Swarm;
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use clap::{Parser, Subcommand};
