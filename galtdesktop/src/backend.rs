@@ -1,8 +1,7 @@
 use std::collections::HashSet;
-use std::io::Write;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::daemons::{self, rtmp_server};
@@ -17,7 +16,7 @@ use crate::StartOpt;
 
 
 pub async fn start_command(opt: StartOpt) -> anyhow::Result<()> {
-    let mut db = crate::db::Db::get().await?;
+    let mut db = appcommon::db::Db::get().await?;
     let keypair = match opt.secret_key_seed {
         Some(seed) => {
             let mut bytes: [u8; 32] = [0u8; 32];

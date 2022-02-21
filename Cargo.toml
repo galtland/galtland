@@ -5,6 +5,7 @@ license = "AGPL-3.0-only"
 members = [
     "galtcli",
     "galtdesktop",
-    "galtcore"
+    "galtcore",
+    "appcommon"
 ]
 

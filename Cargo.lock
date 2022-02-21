@@ -115,6 +115,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "appcommon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "galtcore",
+ "sqlx",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1900,23 +1909,18 @@ name = "galtdesktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "appcommon",
  "byte-unit",
  "clap 3.1.1",
  "galtcore",
  "glow",
- "hex",
  "human-panic",
- "indicatif",
  "instant",
  "libmpv",
  "log",
  "pretty_env_logger",
- "prost",
- "serde_json",
  "slint",
  "slint-build",
- "sqlx",
- "tonic",
 ]
 
 [[package]]
@@ -1924,6 +1928,7 @@ name = "galtland"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "appcommon",
  "byte-unit",
  "clap 3.1.1",
  "console-subscriber",

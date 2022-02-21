@@ -1,19 +1,12 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use clap::{Parser, Subcommand};
-use galtcore::configuration::Configuration;
-use galtcore::daemons::gossip_listener::GossipListenerClient;
-use galtcore::daemons::{self, rtmp_server};
 use galtcore::libp2p::futures::StreamExt;
-use galtcore::libp2p::identity::{self, ed25519};
-use galtcore::libp2p::{self, Multiaddr};
-use galtcore::tokio::sync::mpsc;
-use galtcore::{networkbackendclient, protocols, tokio, utils};
-use log::{info, warn};
+use galtcore::libp2p::Multiaddr;
+use galtcore::tokio;
 
 
 pub mod backend;
-pub mod db;
 pub mod gui;
 pub mod video;
 

@@ -1,9 +1,7 @@
-use glow::HasContext;
-
 use std::mem::transmute;
 use std::os::raw::c_void;
-use std::time::Duration;
 
+use glow::HasContext;
 use libmpv::render::*;
 use libmpv::*;
 
@@ -258,7 +256,7 @@ impl VideoUnderlay {
                 .render::<*mut c_void>(transmute(self.fbo), width as _, height as _, true)
                 .expect("Failed to render");
 
-            let elapsed = self.start_time.elapsed().as_millis() as f32;
+            let _elapsed = self.start_time.elapsed().as_millis() as f32;
 
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);

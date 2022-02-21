@@ -1,0 +1,13 @@
+[package]
+name = "appcommon"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+galtcore = { path="../galtcore" }
+
+sqlx = { version = "0.5", features = [ "runtime-tokio-rustls", "sqlite" , "macros", "chrono", "offline", "any"] }
+
+anyhow = {version="1.0.52", features=["backtrace"]}

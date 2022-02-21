@@ -8,6 +8,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 galtcore = { path="../galtcore" }
+appcommon = { path="../appcommon" }
 
 sqlx = { version = "0.5", features = [ "runtime-tokio-rustls", "sqlite" , "macros", "chrono", "offline", "any"] }
 

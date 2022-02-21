@@ -15,7 +15,6 @@ use log::{info, warn};
 use service::sm;
 use tonic::transport::Uri;
 
-pub mod db;
 pub mod service;
 
 const DEFAULT_API_ADDRESS: &str = "127.0.0.1:51234";
@@ -38,7 +37,7 @@ async fn start_command(
     api_listen_address: Option<std::net::SocketAddr>,
     opt: StartOpt,
 ) -> anyhow::Result<()> {
-    let mut db = db::Db::get().await?;
+    let mut db = appcommon::db::Db::get().await?;
     let keypair = match opt.secret_key_seed {
         Some(seed) => {
             let mut bytes: [u8; 32] = [0u8; 32];
