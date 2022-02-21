@@ -1,0 +1,32 @@
+syntax = "proto3";
+package service_main;
+
+service Service {
+    rpc AddSimpleFile (AddSimpleFileRequest) returns (AddSimpleFileResponse);
+    rpc GetSimpleFile (GetSimpleFileRequest) returns (stream GetSimpleFileResponse);
+    rpc GetNetworkInfo (GetNetworkInfoRequest) returns (GetNetworkInfoResponse);
+}
+
+message AddSimpleFileRequest {
+   string filename = 1;
+}
+
+message AddSimpleFileResponse {
+    string message = 1;
+    bool success = 2;
+    optional string blake3 = 3;
+}
+
+message GetSimpleFileRequest {
+   string hash_hex = 1;
+}
+
+message GetSimpleFileResponse {
+   bytes data = 1;
+}
+
+message GetNetworkInfoRequest {
+}
+message GetNetworkInfoResponse {
+   string info = 1;
+}

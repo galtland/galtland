@@ -1,0 +1,15 @@
+unstable_features = true
+hard_tabs = false
+newline_style = "Auto"
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
+remove_nested_parens = true
+merge_derives = true
+use_try_shorthand = false
+use_field_init_shorthand = false
+force_explicit_abi = true
+reorder_impl_items = true
+blank_lines_upper_bound = 2
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"

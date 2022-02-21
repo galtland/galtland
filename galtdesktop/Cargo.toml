@@ -1,0 +1,34 @@
+[package]
+name = "galtdesktop"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+license = "AGPL-3.0-only"
+
+[dependencies]
+slint = "0.2.0"
+glow = { version = "0.11" }
+instant = { version = "0.1", features = ["now"] }
+libmpv = { git = "https://github.com/anlumo/libmpv-rs" }
+galtcore = { path="../galtcore" }
+
+sqlx = { version = "0.5", features = [ "runtime-tokio-rustls", "sqlite" , "macros", "chrono", "offline", "any"] }
+
+log = "0.4.14"
+pretty_env_logger = "0.4.0"
+byte-unit = "4.0.13"
+anyhow = {version="1.0.52", features=["backtrace"]}
+human-panic = "1.0.3"
+indicatif = "0.16.2"
+clap = { version = "3.0.14", features = ["derive"] }
+tonic = "0.6.2"
+prost = "0.9.0"
+hex = "0.4.3"
+serde_json = "1.0.78"
+
+
+[build-dependencies]
+slint-build = "0.2.0"
+
+# [patch.crates-io.slint]
+# git = "https://github.com/vgarleanu/slint"

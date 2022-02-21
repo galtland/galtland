@@ -1,0 +1,31 @@
+{
+  "db": "SQLite",
+  "249fe46786e59ba15a4b1aa297a47e4d5f3f1f6bb8b58c1a24cf1c0b63c70e9d": {
+    "query": "insert into keypairs (keypair, name) values (?, 'default')",
+    "describe": {
+      "columns": [],
+      "parameters": {
+        "Right": 1
+      },
+      "nullable": []
+    }
+  },
+  "6c8907ffad7cb88da0478aa3a9a6f30836934735e9f995e58f37fd1b753ba685": {
+    "query": "\n                select keypair from keypairs\n                where name = 'default'\n            ",
+    "describe": {
+      "columns": [
+        {
+          "name": "keypair",
+          "ordinal": 0,
+          "type_info": "Blob"
+        }
+      ],
+      "parameters": {
+        "Right": 0
+      },
+      "nullable": [
+        false
+      ]
+    }
+  }
+}
