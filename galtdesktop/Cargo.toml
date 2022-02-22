@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 build = "build.rs"
 license = "AGPL-3.0-only"
+homepage = "https://galtland.io"
+repository = "https://git.galtland.io/galtland/galtland"
+readme = "README.md"
+description = "A desktop app for galtland"
 
 [dependencies]
 galtcore = { path="../galtcore" }

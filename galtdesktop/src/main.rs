@@ -2,7 +2,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use galtcore::libp2p::Multiaddr;
 use galtcore::tokio;
 
@@ -17,13 +17,8 @@ async fn main() -> anyhow::Result<()> {
     human_panic::setup_panic!();
     pretty_env_logger::init_timed();
     let cli = Cli::parse();
-    let rtmp_listen_address = match cli.command {
-        MainCommands::Start(opt) => {
-            let rtmp_listen_address = opt.rtmp_listen_address;
-            backend::start_command(opt).await?;
-            rtmp_listen_address
-        }
-    };
+    let rtmp_listen_address = cli.rtmp_listen_address;
+    backend::start_command(cli).await?;
 
     gui::run_gui(rtmp_listen_address.to_string());
 
@@ -32,13 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
-struct Cli {
-    #[clap(subcommand)]
-    command: MainCommands,
-}
-
-#[derive(clap::Args)]
-pub struct StartOpt {
+pub struct Cli {
     #[clap(long)]
     secret_key_seed: Option<u8>,
 
@@ -71,10 +60,4 @@ pub struct StartOpt {
 
     #[clap(short, long)]
     max_bytes_per_second_upload_stream: Option<byte_unit::Byte>,
-}
-
-
-#[derive(Subcommand)]
-enum MainCommands {
-    Start(StartOpt),
 }

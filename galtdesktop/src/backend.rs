@@ -13,10 +13,10 @@ use galtcore::tokio::sync::mpsc;
 use galtcore::{networkbackendclient, protocols, tokio, utils};
 use log::{info, warn};
 
-use crate::StartOpt;
+use crate::Cli;
 
 
-pub async fn start_command(opt: StartOpt) -> anyhow::Result<()> {
+pub async fn start_command(opt: Cli) -> anyhow::Result<()> {
     let mut db = appcommon::db::Db::get().await?;
     let keypair = match opt.secret_key_seed {
         Some(seed) => {

@@ -3,6 +3,10 @@ name = "galtcli"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
+homepage = "https://galtland.io"
+repository = "https://git.galtland.io/galtland/galtland"
+readme = "README.md"
+description = "A cli (command line interface) for galtland"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
