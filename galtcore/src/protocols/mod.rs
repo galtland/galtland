@@ -694,13 +694,16 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
-            info!("Listening in {}", address);
+            info!("SwarmEvent::NewListenAddr {}", address);
         }
         SwarmEvent::IncomingConnection {
             local_addr,
             send_back_addr,
         } => {
-            info!("Incoming Connection {} {}", local_addr, send_back_addr);
+            info!(
+                "SwarmEvent::IncomingConnection {} {}",
+                local_addr, send_back_addr
+            );
         }
         SwarmEvent::IncomingConnectionError {
             local_addr,
@@ -708,7 +711,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             error,
         } => {
             warn!(
-                "Incoming Connection Error {} {}: {}",
+                "SwarmEvent::IncomingConnectionError {} {}: {}",
                 local_addr, send_back_addr, error
             );
         }
@@ -718,7 +721,10 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             num_established: _,
             concurrent_dial_errors: _,
         } => {
-            info!("Connected to {} at {:?}", peer_id, endpoint);
+            info!(
+                "SwarmEvent::ConnectionEstablished {} at {:?}",
+                peer_id, endpoint
+            );
             match &endpoint {
                 ConnectedPoint::Dialer {
                     address,
@@ -751,7 +757,11 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                 );
                 let endpoint = endpoint.get_remote_address();
                 if opt.rendezvous_addresses.contains(endpoint) {
-                    log::info!("Connected to rendezvous point {:?} ({})", endpoint, peer_id);
+                    log::info!(
+                        "    Connected to rendezvous point {:?} ({})",
+                        endpoint,
+                        peer_id
+                    );
                     swarm
                         .behaviour_mut()
                         .state
@@ -767,12 +777,15 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             cause,
         } => {
             info!(
-                "Connection Closed to {} {:?} {} {:?}",
+                "SwarmEvent::ConnectionClosed {} {:?} {} {:?}",
                 peer_id, endpoint, num_established, cause
             );
         }
         SwarmEvent::OutgoingConnectionError { peer_id, error } => {
-            info!("Outgoing Connection Error {:?}: {}", peer_id, error);
+            info!(
+                "SwarmEvent::OutgoingConnectionError {:?}: {}",
+                peer_id, error
+            );
             //FIXME: if the outgoing connection is to a rendezvous we probably want to keep retrying
             if let Some(_peer) = peer_id {
                 // TODO: check what makes sense here because it's possible to make multiple parallel connection attempts to a peer and just some fail
@@ -792,13 +805,16 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             ComposedEvent::Gossip(event) => gossip::handle_gossip(event, swarm),
         },
         SwarmEvent::BannedPeer { peer_id, endpoint } => {
-            info!("Banned {} at {:?}", peer_id, endpoint);
+            info!("SwarmEvent::BannedPeer {} at {:?}", peer_id, endpoint);
         }
         SwarmEvent::ExpiredListenAddr {
             listener_id,
             address,
         } => {
-            info!("Expired Listen Address {:?} at {}", listener_id, address);
+            info!(
+                "SwarmEvent::ExpiredListenAddr {:?} at {}",
+                listener_id, address
+            );
         }
         SwarmEvent::ListenerClosed {
             listener_id,
@@ -806,15 +822,15 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             reason,
         } => {
             info!(
-                "Listener Closed {:?} at {:?}: {:?}",
+                "SwarmEvent::ListenerClosed {:?} at {:?}: {:?}",
                 listener_id, addresses, reason
             );
         }
         SwarmEvent::ListenerError { listener_id, error } => {
-            warn!("Listener Error {:?}: {}", listener_id, error);
+            warn!("SwarmEvent::ListenerError {:?}: {}", listener_id, error);
         }
         SwarmEvent::Dialing(t) => {
-            debug!("Dialing {}", t);
+            debug!("SwarmEvent::Dialing {}", t);
         }
     }
 }
@@ -841,9 +857,12 @@ pub fn handle_discover_tick(opt: &Configuration, swarm: &mut Swarm<ComposedBehav
                             None,
                             peer,
                         );
-                    } else if let Err(e) = swarm.dial(peer) {
-                        log::warn!("Error (re)dialing rendezvous {peer}: {e}");
-                        //TODO: perhaps find new rendezvous
+                    } else {
+                        match swarm.dial(peer) {
+                            Ok(_) => log::info!("(re)dialing rendezvous {peer}"),
+                            Err(e) => log::warn!("Error (re)dialing rendezvous {peer}: {e}"),
+                            //TODO: perhaps find new rendezvous
+                        }
                     }
                 }
             }
