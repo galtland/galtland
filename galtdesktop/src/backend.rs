@@ -91,7 +91,7 @@ pub async fn start_command(opt: StartOpt) -> anyhow::Result<()> {
         }
     }
 
-    if let Some(address) = opt.dial_address.clone() {
+    if let Some(address) = &opt.dial_address {
         match swarm.dial(address.clone()) {
             Ok(_) => info!("Dialing address {}", address),
             Err(e) => warn!("Failed to dial {}: {}", address, e),

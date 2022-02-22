@@ -751,7 +751,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                 );
                 let endpoint = endpoint.get_remote_address();
                 if opt.rendezvous_addresses.contains(endpoint) {
-                    log::info!("Connected to rendezvous point {:?}", endpoint);
+                    log::info!("Connected to rendezvous point {:?} ({})", endpoint, peer_id);
                     swarm
                         .behaviour_mut()
                         .state
@@ -772,7 +772,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             );
         }
         SwarmEvent::OutgoingConnectionError { peer_id, error } => {
-            warn!("Outgoing Connection Error {:?}: {}", peer_id, error);
+            info!("Outgoing Connection Error {:?}: {}", peer_id, error);
             //FIXME: if the outgoing connection is to a rendezvous we probably want to keep retrying
             if let Some(_peer) = peer_id {
                 // TODO: check what makes sense here because it's possible to make multiple parallel connection attempts to a peer and just some fail
@@ -814,7 +814,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             warn!("Listener Error {:?}: {}", listener_id, error);
         }
         SwarmEvent::Dialing(t) => {
-            info!("Dialing {}", t);
+            debug!("Dialing {}", t);
         }
     }
 }
