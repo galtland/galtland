@@ -416,6 +416,7 @@ pub fn handle_rendezvous_client(
                 }
             }
             if added_new_peers {
+                log::debug!("Starting a kademlia bootstrap because new peers have been added");
                 swarm
                     .behaviour_mut()
                     .kademlia
@@ -742,6 +743,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                         .add_address(&peer_id, send_back_addr.clone());
                 }
             };
+            log::debug!("    Starting a kademlia bootstrap because connected to a new peer");
             swarm
                 .behaviour_mut()
                 .kademlia
