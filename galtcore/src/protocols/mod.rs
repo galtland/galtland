@@ -743,12 +743,12 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                         .add_address(&peer_id, send_back_addr.clone());
                 }
             };
-            log::debug!("    Starting a kademlia bootstrap because connected to a new peer");
-            swarm
-                .behaviour_mut()
-                .kademlia
-                .bootstrap()
-                .expect("to be able to start bootstrap process");
+            // log::debug!("    Starting a kademlia bootstrap because connected to a new peer");
+            // swarm
+            //     .behaviour_mut()
+            //     .kademlia
+            //     .bootstrap()
+            //     .expect("to be able to start bootstrap process");
 
             if !opt.disable_rendezvous_discover {
                 swarm.behaviour_mut().rendezvous_client.discover(
