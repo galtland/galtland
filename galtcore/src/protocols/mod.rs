@@ -561,7 +561,7 @@ pub fn handle_network_backend_command(
                     key
                 );
                 let kad_key = libp2p::kad::record::Key::new(&key);
-                b.kademlia.get_record(&kad_key, libp2p::kad::Quorum::One);
+                b.kademlia.get_record(kad_key, libp2p::kad::Quorum::One);
                 match b.state.pending_get_records.entry(key) {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         entry.get_mut().push(sender);

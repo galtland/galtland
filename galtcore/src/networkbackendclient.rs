@@ -7,6 +7,7 @@ use libp2p::gossipsub::error::PublishError;
 use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::record::Key;
 use libp2p::request_response::ResponseChannel;
+use libp2p::swarm::NetworkInfo;
 use libp2p::PeerId;
 use tokio::sync::{mpsc, oneshot};
 
@@ -89,7 +90,7 @@ pub enum NetworkBackendCommand {
         sender: oneshot::Sender<HashMap<PeerId, PeerStatistics>>,
     },
     GetSwarmNetworkInfo {
-        sender: oneshot::Sender<libp2p::core::network::NetworkInfo>,
+        sender: oneshot::Sender<NetworkInfo>,
     },
 }
 
@@ -327,9 +328,7 @@ impl NetworkBackendClient {
         Ok(receiver.await?)
     }
 
-    pub async fn get_swarm_network_info(
-        &mut self,
-    ) -> anyhow::Result<libp2p::core::network::NetworkInfo> {
+    pub async fn get_swarm_network_info(&mut self) -> anyhow::Result<NetworkInfo> {
         log::debug!("get_swarm_network_info");
         let (sender, receiver) = oneshot::channel();
         self.sender
