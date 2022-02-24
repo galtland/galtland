@@ -9,6 +9,7 @@ pub mod simple_file_exchange;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use anyhow::Context;
 use kademlia_record::KademliaRecord;
 use libp2p::core::ConnectedPoint;
 use libp2p::identify::{Identify, IdentifyEvent};
@@ -508,7 +509,7 @@ pub fn handle_ping(event: ping::Event, swarm: &mut Swarm<ComposedBehaviour>) {
 pub fn handle_network_backend_command(
     command: NetworkBackendCommand,
     swarm: &mut Swarm<ComposedBehaviour>,
-) {
+) -> anyhow::Result<()> {
     match command {
         NetworkBackendCommand::StartProvidingSimpleFile {
             key,
@@ -520,7 +521,7 @@ pub fn handle_network_backend_command(
             let query_id = b
                 .kademlia
                 .start_providing(record_key)
-                .expect("No store error");
+                .context("Expected no store error")?;
             b.state.pending_start_providing.insert(
                 query_id,
                 StartProvidingAction::SimpleFile { filename, sender },
@@ -536,7 +537,7 @@ pub fn handle_network_backend_command(
             let query_id = b
                 .kademlia
                 .start_providing(record_key)
-                .expect("No store error");
+                .context("Expected no store error")?; //FIXME: we need some sort of store cleanup
             b.state
                 .pending_start_providing
                 .insert(query_id, StartProvidingAction::RTMPStreaming { sender });
@@ -600,11 +601,14 @@ pub fn handle_network_backend_command(
                 .insert(request_id, sender);
         }
         NetworkBackendCommand::RespondSimpleFile { response, channel } => {
-            swarm
+            if swarm
                 .behaviour_mut()
                 .simple_file_exchange
                 .send_response(channel, response)
-                .expect("Connection to peer to be still open");
+                .is_err()
+            {
+                log::warn!("Expected connection to peer to be still open");
+            }
         }
         NetworkBackendCommand::GetPublishedFileName { key, sender } => {
             let key = libp2p::kad::record::Key::new(&key);
@@ -614,7 +618,7 @@ pub fn handle_network_backend_command(
                 .published_files_mapping
                 .get(&key)
                 .cloned();
-            sender.send(filename).expect("Receiver not to be dropped");
+            sender.send(filename).map_err(utils::send_error)?;
         }
         NetworkBackendCommand::RequestRTMPData {
             params: RequestRTMPDataParams { peer, request },
@@ -648,9 +652,7 @@ pub fn handle_network_backend_command(
         }
         NetworkBackendCommand::GetPeerStatistics { sender } => {
             let peer_statistics = swarm.behaviour().state.peer_statistics.clone();
-            sender
-                .send(peer_statistics)
-                .expect("Receiver not to be dropped");
+            sender.send(peer_statistics).map_err(utils::send_error)?;
         }
         NetworkBackendCommand::RespondPaymentInfo { response, channel } => {
             if swarm
@@ -665,27 +667,26 @@ pub fn handle_network_backend_command(
         NetworkBackendCommand::GetSwarmNetworkInfo { sender } => {
             sender
                 .send(swarm.network_info())
-                .expect("Receiver not to be dropped");
+                .map_err(utils::send_error)?;
         }
         NetworkBackendCommand::PublishGossip {
             data,
             topic,
             sender,
         } => match swarm.behaviour_mut().gossip.publish(topic, data) {
-            Ok(_) => sender.send(Ok(())).expect("Receiver not to be dropped"),
-            Err(e) => sender
-                .send(Err(anyhow::anyhow!("publish error: {}", e)))
-                .expect("Receiver not to be dropped"),
+            Ok(_) => sender.send(Ok(())).map_err(utils::send_error)?,
+            Err(e) => sender.send(Err(e)).map_err(utils::send_error)?,
         },
         NetworkBackendCommand::StopProviding { kad_key, sender } => {
             swarm.behaviour_mut().kademlia.stop_providing(&kad_key);
-            sender.send(()).expect("Receiver not to be dropped");
+            sender.send(()).map_err(utils::send_error)?;
         }
         NetworkBackendCommand::RemoveRecord { kad_key, sender } => {
             swarm.behaviour_mut().kademlia.remove_record(&kad_key);
-            sender.send(()).expect("Receiver not to be dropped");
+            sender.send(()).map_err(utils::send_error)?;
         }
-    }
+    };
+    Ok(())
 }
 
 pub fn handle_swarm_event<E: std::fmt::Debug>(

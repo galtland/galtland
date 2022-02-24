@@ -164,7 +164,7 @@ async fn start_command(
                  protocols::handle_discover_tick(&configuration, &mut swarm)
             },
             command = network_backend_command_receiver.recv() => match command {
-                Some(e) => protocols::handle_network_backend_command(e, &mut swarm),
+                Some(e) => protocols::handle_network_backend_command(e, &mut swarm)?,
                 None => todo!(),
             },
             event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)

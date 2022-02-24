@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use itertools::Itertools;
+use libp2p::gossipsub::error::PublishError;
 use libp2p::PeerId;
 use log::debug;
 use tokio::sync::mpsc::{self};
@@ -354,9 +355,14 @@ async fn publisher_publish(
     network
         .start_providing_rtmp_streaming(kad_key.clone(), streaming_key.clone())
         .await?;
-    network
+    match network
         .publish_gossip(kad_key.to_vec(), protocols::gossip::rtmp_keys_gossip())
-        .await?;
+        .await?
+    {
+        Ok(_) => {}
+        Err(PublishError::Duplicate) => {} // it's okay
+        Err(e) => anyhow::bail!("Publish error: {e:?}"),
+    };
     Ok(())
 }
 

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
+use libp2p::gossipsub::error::PublishError;
 use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::record::Key;
 use libp2p::request_response::ResponseChannel;
@@ -58,7 +59,7 @@ pub enum NetworkBackendCommand {
     PublishGossip {
         data: Vec<u8>,
         topic: IdentTopic,
-        sender: oneshot::Sender<anyhow::Result<()>>,
+        sender: oneshot::Sender<Result<(), PublishError>>,
     },
     RequestSimpleFile {
         file_request: SimpleFileRequest,
@@ -214,7 +215,11 @@ impl NetworkBackendClient {
         Ok(())
     }
 
-    pub async fn publish_gossip(&mut self, data: Vec<u8>, topic: IdentTopic) -> anyhow::Result<()> {
+    pub async fn publish_gossip(
+        &mut self,
+        data: Vec<u8>,
+        topic: IdentTopic,
+    ) -> anyhow::Result<Result<(), PublishError>> {
         log::debug!("publish_topic {:?} to {}", data, topic.to_string());
         let (sender, receiver) = oneshot::channel();
         self.sender
@@ -225,7 +230,7 @@ impl NetworkBackendClient {
             })
             .await?;
         tokio::task::yield_now().await;
-        receiver.await?
+        Ok(receiver.await?)
     }
 
     pub async fn request_simple_file(
