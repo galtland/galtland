@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use anyhow::Context;
 use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::record::Key;
 use libp2p::request_response::ResponseChannel;
@@ -197,7 +198,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::PutRecord { record, sender })
             .await
-            .expect("Command receiver not to be dropped.");
+            .context("Expected command receiver not to be dropped.")?;
         tokio::task::yield_now().await;
         receiver.await?
     }

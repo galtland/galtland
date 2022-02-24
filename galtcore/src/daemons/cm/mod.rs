@@ -3,12 +3,12 @@
 pub mod payment_info;
 pub mod rtmp;
 pub mod simple_file;
-
 use std::collections::{HashMap, VecDeque};
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use itertools::Itertools;
 use libp2p::PeerId;
 use tokio::sync::mpsc::Receiver;
@@ -247,7 +247,7 @@ pub async fn run_loop(
     let shared_global_state = SharedGlobalState::new();
     loop {
         tokio::task::yield_now().await;
-        let e = receiver.recv().await.expect("Receiver to be infinite");
+        let e = receiver.recv().await.context("Loop finished")?;
         utils::spawn_and_log_error(handle_client_command(
             opt.clone(),
             identity.clone(),

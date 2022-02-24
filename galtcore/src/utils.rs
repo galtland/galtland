@@ -88,3 +88,8 @@ pub fn measure<F: FnOnce() -> R, R>(prefix: &str, block: F) -> R {
 pub fn measure_noop<F: FnOnce() -> R, R>(_prefix: &str, block: F) -> R {
     block()
 }
+
+
+pub fn send_error<E>(_: E) -> anyhow::Error {
+    anyhow::anyhow!("expected receiver to not be dropped")
+}

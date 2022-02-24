@@ -2,6 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use libp2p::gossipsub::GossipsubMessage;
 use libp2p::request_response::ResponseChannel;
 use libp2p::PeerId;
@@ -58,7 +59,7 @@ pub async fn run_loop(
     loop {
         // TODO: consider dropping events if we can't handle everything
         tokio::task::yield_now().await;
-        match event_receiver.recv().await.expect("loop to be infinite") {
+        match event_receiver.recv().await.context("loop finished")? {
             InternalNetworkEvent::InboundFileRequest {
                 peer,
                 request,

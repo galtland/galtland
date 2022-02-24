@@ -105,12 +105,12 @@ pub async fn start_command(opt: Cli) -> anyhow::Result<()> {
         identity,
     ));
 
-    let gossip_listener_client = GossipListenerClient::new(networkbackendclient.clone());
+    let gossip_listener_client = GossipListenerClient::new(networkbackendclient);
 
     utils::spawn_and_log_error(daemons::internal_network_events::run_loop(
         event_receiver,
-        highlevel_command_sender.clone(),
-        gossip_listener_client.clone(),
+        highlevel_command_sender,
+        gossip_listener_client,
     ));
 
     utils::spawn_and_log_error({

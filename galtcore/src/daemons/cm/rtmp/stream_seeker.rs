@@ -2,6 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use libp2p::kad::record::Key;
 use libp2p::request_response::OutboundFailure;
 use rayon::prelude::*;
@@ -17,7 +18,6 @@ use crate::protocols::rtmp_streaming::{
 };
 use crate::protocols::NodeIdentity;
 use crate::utils;
-
 
 pub async fn launch_daemon(
     identity: NodeIdentity,
@@ -128,7 +128,7 @@ async fn _stream_seeker_daemon(
                 record.clone(),
             )
             .await
-            .expect("to launch daemon"),
+            .context("failed to launch daemon")?,
         }
     };
 
@@ -142,19 +142,33 @@ async fn _stream_seeker_daemon(
     let mut empty_data_count = 0;
     let mut consecutive_errors = 0;
     loop {
-        let peers = seeker_client.get_peers().await;
+        let peers = seeker_client.get_peers().await?;
         if peers.is_empty() {
             log::debug!("No peers found for {streaming_key:?}, sleeping a little...");
             tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        for peer in peers {
-            let request = RTMPStreamingRequest {
-                streaming_key: streaming_key.clone(),
-                seek_type,
+        } else {
+            let future_requests = peers.into_iter().map(|peer| {
+                let request = RTMPStreamingRequest {
+                    streaming_key: streaming_key.clone(),
+                    seek_type,
+                };
+                let mut network = network.clone();
+                log::debug!("Calling {streaming_key:?} on {peer} with {seek_type:?}");
+                Box::pin(async move {
+                    match network.request_rtmp_streaming_data(request, peer).await {
+                        Ok(r) => Ok((peer, r)),
+                        Err(e) => Err((peer, e)),
+                    }
+                })
+            });
+
+            let request_result = match futures::future::select_ok(future_requests).await {
+                Ok((result, _vec)) => result,
+                Err((_peer, e)) => return Err(e),
             };
-            log::debug!("Calling {streaming_key:?} on {peer} with {seek_type:?}");
-            match network.request_rtmp_streaming_data(request, peer).await? {
-                Ok(Ok(RtmpStreamingResponse::Data(responses))) if !responses.is_empty() => {
+
+            match request_result {
+                (peer, Ok(Ok(RtmpStreamingResponse::Data(responses)))) if !responses.is_empty() => {
                     let responses_len = responses.len();
                     let valid_responses_len = utils::measure_noop("r.verify", || {
                         responses.par_iter().filter(|r| r.verify(&record)).count()
@@ -165,7 +179,7 @@ async fn _stream_seeker_daemon(
                             responses_len,
                             valid_responses_len
                         );
-                        seeker_client.ban_on_recoverable_error(peer).await;
+                        seeker_client.ban_on_recoverable_error(peer).await?;
                     }
                     // reset counters
                     empty_data_count = 0;
@@ -186,21 +200,21 @@ async fn _stream_seeker_daemon(
                         .iter()
                         .map(|r| r.rtmp_data.source_offset)
                         .max()
-                        .expect("non empty list");
+                        .context("empty list")?;
 
                     if let RTMPDataSeekType::Offset(existing_source_offset) = seek_type {
                         if existing_source_offset >= new_source_offset {
                             log::warn!("Received offset {:?} which isn't above current {:?} from peer {}, blacklisting and skipping...", new_source_offset, existing_source_offset, peer);
-                            seeker_client.ban(peer).await;
+                            seeker_client.ban(peer).await?;
                         }
                     }
                     seek_type = RTMPDataSeekType::Offset(new_source_offset);
                     rtmp_publisher_client
                         .feed_data(responses.into_iter().collect())
                         .await
-                        .expect("daemon alive!?"); // TODO: check what to do
+                        .context("daemon alive!?")?; // TODO: check what to do
                 }
-                Ok(Ok(RtmpStreamingResponse::Data(_))) => {
+                (peer, Ok(Ok(RtmpStreamingResponse::Data(_)))) => {
                     const MAX_EMPTY_DATA: usize = 5;
                     empty_data_count += 1;
                     if empty_data_count >= MAX_EMPTY_DATA {
@@ -212,33 +226,36 @@ async fn _stream_seeker_daemon(
                         log::info!("Received empty response from {}", peer);
                     }
                 }
-                Ok(Ok(RtmpStreamingResponse::MaxUploadRateReached)) => {
+                (peer, Ok(Ok(RtmpStreamingResponse::MaxUploadRateReached))) => {
                     log::warn!(
                         "Received RtmpStreamingResponse::MaxUploadRateReached response from {peer}"
                     );
-                    seeker_client.ban_on_max_upload(peer).await;
+                    seeker_client.ban_on_max_upload(peer).await?;
                 }
-                Ok(Ok(RtmpStreamingResponse::TooMuchFlood)) => {
+                (peer, Ok(Ok(RtmpStreamingResponse::TooMuchFlood))) => {
                     log::warn!("Received RtmpStreamingResponse::TooMuchFlood response from {peer}");
-                    seeker_client.ban_on_flood(peer).await;
+                    seeker_client.ban_on_flood(peer).await?;
                 }
-                Ok(Err(e)) => {
+                (peer, Ok(Err(e))) => {
                     log::warn!("Received error {e} from {peer}");
-                    seeker_client.ban_on_recoverable_error(peer).await;
+                    seeker_client.ban_on_recoverable_error(peer).await?;
                     consecutive_errors += 1;
                 }
-                Err(OutboundFailure::UnsupportedProtocols) => {
+                (peer, Err(OutboundFailure::UnsupportedProtocols)) => {
                     log::debug!("Received OutboundFailure::UnsupportedProtocols from {peer}");
-                    seeker_client.ban(peer).await;
+                    seeker_client.ban(peer).await?;
                     consecutive_errors += 1;
                 }
-                Err(
-                    e @ (OutboundFailure::ConnectionClosed
-                    | OutboundFailure::DialFailure
-                    | OutboundFailure::Timeout),
+                (
+                    peer,
+                    Err(
+                        e @ (OutboundFailure::ConnectionClosed
+                        | OutboundFailure::DialFailure
+                        | OutboundFailure::Timeout),
+                    ),
                 ) => {
                     log::info!("Received {e:?} from {peer}");
-                    seeker_client.ban_on_recoverable_error(peer).await;
+                    seeker_client.ban_on_recoverable_error(peer).await?;
                     consecutive_errors += 1;
                 }
             }
@@ -255,10 +272,13 @@ async fn _stream_seeker_daemon(
             let last_sent = rtmp_publisher_client
                 .get_last_sent()
                 .await
-                .expect("to receive");
+                .context("failed to receive")?;
             if SystemTime::now().duration_since(last_sent).unwrap() > MAX_INACTIVITY_TIME {
                 log::info!("Exiting {streaming_key:?} because of inactivity");
-                rtmp_publisher_client.die().await.expect("to receive");
+                rtmp_publisher_client
+                    .die()
+                    .await
+                    .context("failed to receive")?;
                 return Ok(());
             }
         }

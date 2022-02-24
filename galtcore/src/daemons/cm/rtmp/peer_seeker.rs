@@ -16,7 +16,7 @@ use crate::protocols::rtmp_streaming::{
     RTMPDataSeekType, RTMPStreamingRequest, RtmpStreamingKey, RtmpStreamingResponse, StreamOffset,
 };
 use crate::protocols::{NodeIdentity, PeerStatistics};
-use crate::utils::{spawn_and_log_error, ArcMutex};
+use crate::utils::{self, spawn_and_log_error, ArcMutex};
 
 pub fn launch_daemon(
     identity: NodeIdentity,
@@ -38,18 +38,17 @@ pub struct PeerSeekerClient {
 }
 
 impl PeerSeekerClient {
-    // TODO: everything here should return anyhow::Result<>
-    pub async fn get_peers(&self) -> Vec<PeerId> {
+    pub async fn get_peers(&self) -> anyhow::Result<Vec<PeerId>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(SeekerCommands::GetPeers { sender })
             .await
-            .expect("Command receiver not to be dropped");
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
-        receiver.await.expect("Sender not to be dropped")
+        Ok(receiver.await.map_err(utils::send_error)?)
     }
 
-    async fn temporarily_ban(&self, peer: PeerId, expire_time: SystemTime) {
+    async fn temporarily_ban(&self, peer: PeerId, expire_time: SystemTime) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(SeekerCommands::TemporarilyBanPeer {
@@ -58,22 +57,24 @@ impl PeerSeekerClient {
                 sender,
             })
             .await
-            .expect("Command receiver not to be dropped");
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
-        receiver.await.expect("Sender not to be dropped");
+        receiver.await.map_err(utils::send_error)?;
+        Ok(())
     }
 
-    pub async fn ban(&self, peer: PeerId) {
+    pub async fn ban(&self, peer: PeerId) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(SeekerCommands::PermanentlyBanPeer { peer, sender })
             .await
-            .expect("Command receiver not to be dropped");
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
-        receiver.await.expect("Sender not to be dropped");
+        receiver.await.map_err(utils::send_error)?;
+        Ok(())
     }
 
-    pub async fn ban_on_recoverable_error(&self, peer: PeerId) {
+    pub async fn ban_on_recoverable_error(&self, peer: PeerId) -> anyhow::Result<()> {
         self.temporarily_ban(
             peer,
             SystemTime::now() + PeerSeeker::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
@@ -81,7 +82,7 @@ impl PeerSeekerClient {
         .await
     }
 
-    pub async fn ban_on_flood(&self, peer: PeerId) {
+    pub async fn ban_on_flood(&self, peer: PeerId) -> anyhow::Result<()> {
         self.temporarily_ban(
             peer,
             SystemTime::now() + PeerSeeker::BLACKLIST_DURATION_ON_FLOOD,
@@ -89,7 +90,7 @@ impl PeerSeekerClient {
         .await
     }
 
-    pub async fn ban_on_max_upload(&self, peer: PeerId) {
+    pub async fn ban_on_max_upload(&self, peer: PeerId) -> anyhow::Result<()> {
         self.temporarily_ban(
             peer,
             SystemTime::now() + PeerSeeker::BLACKLIST_DURATION_ON_MAX_UPLOAD,
@@ -183,7 +184,7 @@ impl PeerSeeker {
                 },
                 command = commands.recv() => {
                     match command {
-                        Some(c) => self.handle_command(c).await,
+                        Some(c) => self.handle_command(c).await?,
                         None => {
                             log::info!("Received empty command, exiting...");
                             break;
@@ -195,7 +196,7 @@ impl PeerSeeker {
         Ok(())
     }
 
-    async fn handle_command(&mut self, command: SeekerCommands) {
+    async fn handle_command(&mut self, command: SeekerCommands) -> anyhow::Result<()> {
         let streaming_key = &self.streaming_key;
         match command {
             SeekerCommands::GetPeers { sender } => {
@@ -218,7 +219,7 @@ impl PeerSeeker {
                     .map(|(_, peer)| peer)
                     .take(Self::MAX_BEST_PEERS)
                     .collect();
-                sender.send(final_peers).expect("receiver still up");
+                sender.send(final_peers).map_err(utils::send_error)?;
             }
             SeekerCommands::TemporarilyBanPeer {
                 peer,
@@ -231,15 +232,16 @@ impl PeerSeeker {
                 state
                     .peers
                     .insert(peer, PeerState::TemporarilyBlacklisted(expire_time));
-                sender.send(()).expect("receiver still up");
+                sender.send(()).map_err(utils::send_error)?;
             }
             SeekerCommands::PermanentlyBanPeer { peer, sender } => {
                 let mut state = self.peer_shared_state.lock().await;
                 Self::try_abort_update(&peer, &mut state);
                 state.peers.insert(peer, PeerState::Blacklisted);
-                sender.send(()).expect("receiver still up");
+                sender.send(()).map_err(utils::send_error)?;
             }
-        }
+        };
+        Ok(())
     }
 
     fn try_abort_update<'a>(

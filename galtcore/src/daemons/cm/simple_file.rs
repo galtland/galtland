@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use bytes::BytesMut;
 use itertools::Itertools;
 use libp2p::request_response::ResponseChannel;
@@ -52,7 +53,7 @@ pub async fn handle_get(
             sender
                 .send(Err(e.to_string()))
                 .await
-                .expect("Receiver still up");
+                .context("Expected receiver to be still up")?;
             return Ok(());
         }
     };
@@ -62,7 +63,7 @@ pub async fn handle_get(
             sender
                 .send(Err("No peers for file".to_string()))
                 .await
-                .expect("Receiver still up");
+                .context("Expected receiver to be still up")?;
             return Ok(());
         }
     };
@@ -75,20 +76,26 @@ pub async fn handle_get(
         {
             Ok(Ok(r)) => {
                 let eof = r.eof;
-                sender.send(Ok(r)).await.expect("Receiver still up");
+                sender
+                    .send(Ok(r))
+                    .await
+                    .context("Expected receiver to be still up")?;
                 if eof {
                     return Ok(());
                 }
             }
             Ok(Err(e)) => {
-                sender.send(Err(e)).await.expect("Receiver still up");
+                sender
+                    .send(Err(e))
+                    .await
+                    .context("Expected receiver to be still up")?;
                 return Ok(());
             }
             Err(e) => {
                 sender
                     .send(Err(e.to_string()))
                     .await
-                    .expect("Receiver still up");
+                    .context("Expected receiver to be still up")?;
                 return Ok(());
             }
         }
@@ -131,7 +138,9 @@ pub async fn handle_publish(
     };
     log::debug!("publish result {:?}", result);
 
-    sender.send(result).expect("Send result");
+    if sender.send(result).is_err() {
+        anyhow::bail!("Failed to send result")
+    }
     Ok(())
 }
 
@@ -147,7 +156,6 @@ pub async fn handle_respond(
         channel,
     } = info;
     debug!("handle_respond {} {:?}", peer, request);
-
     let receiver = shared_state
         .active_file_transfers
         .lock()
@@ -204,7 +212,9 @@ async fn respond_simple_file_daemon(
     sender: mpsc::Sender<Result<SimpleFileResponse, String>>,
     filename: String,
 ) -> anyhow::Result<()> {
-    let f = File::open(filename).await.expect("file to be acessible");
+    let f = File::open(filename)
+        .await
+        .context("expected file to be accessible")?;
     let mut f = BufReader::with_capacity(8192, f); // TODO: check if makes any difference
     let frame_size: usize = 16 * 1024;
     let max_bytes_per_packet: usize = 1024 * 1024;
@@ -229,7 +239,7 @@ async fn respond_simple_file_daemon(
                     sender
                         .send(Err(e))
                         .await
-                        .expect("receiver able to receive data");
+                        .context("expected receiver able to receive data")?;
                     return Ok(());
                 }
             }
@@ -240,7 +250,7 @@ async fn respond_simple_file_daemon(
         sender
             .send(Ok(response))
             .await
-            .expect("receiver able to receive data");
+            .context("expected receiver able to receive data")?;
         tokio::task::yield_now().await;
     }
     let last_response = SimpleFileResponse {
@@ -250,6 +260,6 @@ async fn respond_simple_file_daemon(
     sender
         .send(Ok(last_response))
         .await
-        .expect("receiver able to receive data");
+        .context("expected receiver able to receive data")?;
     Ok(())
 }

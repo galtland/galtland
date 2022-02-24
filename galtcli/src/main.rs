@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
@@ -44,9 +45,9 @@ async fn start_command(
         Some(seed) => {
             let mut bytes: [u8; 32] = [0u8; 32];
             bytes[0] = seed;
-            let secret_key = ed25519::SecretKey::from_bytes(&mut bytes).expect(
+            let secret_key = ed25519::SecretKey::from_bytes(&mut bytes).context(
                 "this returns `Err` only if the length is wrong; the length is correct; qed",
-            );
+            )?;
             identity::Keypair::Ed25519(secret_key.into())
         }
         None => db.get_or_create_keypair().await?,
@@ -180,7 +181,9 @@ async fn get_service_client(
         .authority(dst.to_string())
         .path_and_query("")
         .build()?;
-    Ok(service::sm::service_client::ServiceClient::connect(dst).await?)
+    Ok(service::sm::service_client::ServiceClient::connect(dst)
+        .await
+        .context("connecting to ")?)
 }
 
 async fn files_command(
@@ -209,7 +212,7 @@ async fn files_command(
                         std::io::stdout()
                             .lock()
                             .write_all(&r.data)
-                            .expect("to be able to write");
+                            .context("failed to write")?;
                     }
                     Err(e) => {
                         eprintln!("Application error: {}", e);
