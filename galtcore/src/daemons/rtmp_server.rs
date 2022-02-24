@@ -237,6 +237,12 @@ async fn connection_loop(
                             }
                         };
 
+                        if stream_key != peer_id {
+                            anyhow::bail!(
+                                "We only accept publish for stream key: {peer_id} but received for: {stream_key}"
+                            );
+                        }
+
                         let streaming_key = RtmpStreamingKey {
                             app_name: app_name.clone(),
                             stream_key,
@@ -430,11 +436,6 @@ async fn connection_loop(
                                 anyhow::bail!("Error converting stream key to peer id: {}", e);
                             }
                         };
-                        if stream_key != peer_id {
-                            anyhow::bail!(
-                                "We only accept stream key: {peer_id} but received: {stream_key}"
-                            );
-                        }
                         let streaming_key = RtmpStreamingKey {
                             app_name: app_name.clone(),
                             stream_key,
