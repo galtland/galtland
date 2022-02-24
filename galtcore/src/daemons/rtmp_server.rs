@@ -233,11 +233,17 @@ async fn connection_loop(
                         let stream_key = match PeerId::from_str(&stream_key) {
                             Ok(p) => p,
                             Err(e) => {
+                                reader_receiver.close();
+                                stream.shutdown().await?;
+                                reader_daemon_handle.abort();
                                 anyhow::bail!("Error converting stream key to peer id: {}", e);
                             }
                         };
 
                         if stream_key != peer_id {
+                            reader_receiver.close();
+                            stream.shutdown().await?;
+                            reader_daemon_handle.abort();
                             anyhow::bail!(
                                 "We only accept publish for stream key: {peer_id} but received for: {stream_key}"
                             );
@@ -261,6 +267,9 @@ async fn connection_loop(
                             .await
                             .is_err()
                         {
+                            reader_receiver.close();
+                            stream.shutdown().await?;
+                            reader_daemon_handle.abort();
                             anyhow::bail!("receiver died")
                         };
 
