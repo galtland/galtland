@@ -469,7 +469,7 @@ pub fn handle_identity(
                 swarm.behaviour_mut().rendezvous_client.register(
                     rendezvous::Namespace::from_static(RENDEZVOUS_NAMESPACE),
                     peer_id,
-                    Some(5 * 60),
+                    Some(rendezvous::MIN_TTL),
                 );
             }
         }

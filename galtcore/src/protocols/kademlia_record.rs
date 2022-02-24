@@ -55,7 +55,7 @@ impl RtmpStreamingRecord {
         updated_at: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<Self> {
         if streaming_key.app_name.is_empty() {
-            return Err(anyhow::anyhow!("Empty app name"));
+            anyhow::bail!("Empty app name");
         }
         let kad_key =
             Self::rtmp_streaming_kad_key(&streaming_key.app_name, &streaming_key.stream_key);
@@ -176,31 +176,23 @@ impl TryFrom<&Record> for KademliaRecord {
                 signature,
             } => {
                 if key.len() != RTMP_KEY_SIZE {
-                    return Err(anyhow::anyhow!(
-                        "Key length is {} instead of {}",
-                        key.len(),
-                        RTMP_KEY_SIZE
-                    ));
+                    anyhow::bail!("Key length is {} instead of {}", key.len(), RTMP_KEY_SIZE);
                 }
                 let public_key = libp2p::core::PublicKey::from_protobuf_encoding(&public_key)?;
                 let peer_id = public_key.to_peer_id();
 
                 let stream_key = match stream_key.try_into() {
                     Ok(p) => p,
-                    Err(_) => return Err(anyhow::anyhow!("stream_key isn't a valid PeerId")),
+                    Err(_) => anyhow::bail!("stream_key isn't a valid PeerId"),
                 };
 
                 if peer_id != stream_key {
-                    return Err(anyhow::anyhow!(
-                        "peer id {} should match stream key {}",
-                        peer_id,
-                        stream_key,
-                    ));
+                    anyhow::bail!("peer id {} should match stream key {}", peer_id, stream_key,);
                 }
                 let calculated_key =
                     RtmpStreamingRecord::rtmp_streaming_kad_key(&app_name, &stream_key);
                 if calculated_key != key {
-                    return Err(anyhow::anyhow!("Invalid key"));
+                    anyhow::bail!("Invalid key");
                 }
 
                 let updated_at = Utc.timestamp(updated_at_timestamp_seconds, 0);
@@ -209,7 +201,7 @@ impl TryFrom<&Record> for KademliaRecord {
                     &updated_at,
                 );
                 if !public_key.verify(&signature_data, &signature) {
-                    return Err(anyhow::anyhow!("Invalid signature"));
+                    anyhow::bail!("Invalid signature");
                 }
                 let streaming_key = RtmpStreamingKey {
                     app_name,
@@ -224,15 +216,5 @@ impl TryFrom<&Record> for KademliaRecord {
                 }))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn larger_can_hold_smaller() {
-
-        // assert!(larger.can_hold(&smaller));
     }
 }

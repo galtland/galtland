@@ -29,7 +29,7 @@ use crate::protocols::rtmp_streaming::{
     RtmpStreamingResponse, SignedRtmpData, StreamOffset,
 };
 use crate::protocols::NodeIdentity;
-use crate::utils::spawn_and_log_error;
+use crate::utils::{self, spawn_and_log_error};
 
 pub async fn accept_loop(
     addr: SocketAddr,
@@ -233,10 +233,7 @@ async fn connection_loop(
                         let stream_key = match PeerId::from_str(&stream_key) {
                             Ok(p) => p,
                             Err(e) => {
-                                return Err(anyhow::anyhow!(
-                                    "Error converting stream key to peer id: {}",
-                                    e
-                                ))
+                                anyhow::bail!("Error converting stream key to peer id: {}", e);
                             }
                         };
 
@@ -430,27 +427,26 @@ async fn connection_loop(
                         let stream_key = match PeerId::from_str(&stream_key) {
                             Ok(p) => p,
                             Err(e) => {
-                                return Err(anyhow::anyhow!(
-                                    "Error converting stream key to peer id: {}",
-                                    e
-                                ))
+                                anyhow::bail!("Error converting stream key to peer id: {}", e);
                             }
                         };
+                        if stream_key != peer_id {
+                            anyhow::bail!(
+                                "We only accept stream key: {peer_id} but received: {stream_key}"
+                            );
+                        }
                         let streaming_key = RtmpStreamingKey {
                             app_name: app_name.clone(),
                             stream_key,
                         };
                         let (sender, receiver) = oneshot::channel();
-                        if commands
+                        commands
                             .send(ClientCommand::PlayRTMPStream(PlayRTMPStreamInfo {
                                 streaming_key,
                                 sender,
                             }))
                             .await
-                            .is_err()
-                        {
-                            anyhow::bail!("receiver died")
-                        };
+                            .map_err(utils::send_error)?;
 
                         let publisher = receiver.await??;
 

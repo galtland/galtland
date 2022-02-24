@@ -117,7 +117,7 @@ async fn _rtmp_publisher_daemon(
                 if rtmp_data.is_empty() =>
             {
                 log::debug!("Empty rtmp_data received");
-                sender.send(Ok(())).expect("sender still up");
+                sender.send(Ok(())).map_err(utils::send_error)?;
                 tokio::task::yield_now().await;
             }
 
@@ -161,7 +161,7 @@ async fn _rtmp_publisher_daemon(
                 if failure_processing_responses {
                     sender
                         .send(Err(anyhow::anyhow!("Invalid frame received, aborting...")))
-                        .expect("sender still up");
+                        .map_err(utils::send_error)?;
                     tokio::task::yield_now().await;
                     continue;
                 }
@@ -183,12 +183,13 @@ async fn _rtmp_publisher_daemon(
                 for consumer_to_remove in &consumers_to_remove {
                     consumers.remove(consumer_to_remove);
                 }
-                sender.send(Ok(())).expect("sender still up");
+                sender.send(Ok(())).map_err(utils::send_error)?;
                 tokio::task::yield_now().await;
                 if !published {
-                    published = publisher_publish(&streaming_key, &mut network, &record)
-                        .await
-                        .is_ok();
+                    match publisher_publish(&streaming_key, &mut network, &record).await {
+                        Ok(_) => published = true,
+                        Err(e) => log::warn!("Failed to publish {streaming_key:?}: {e:?}"),
+                    };
                 }
             }
 
@@ -349,40 +350,14 @@ async fn publisher_publish(
     debug!("rtmp_publisher_daemon initialization {:?}", streaming_key);
     let kad_record = KademliaRecord::Rtmp(record.clone());
     let kad_key = kad_record.key().clone();
-    let put_record_result = network.put_record(kad_record).await;
-    let start_providing_result = network
+    network.put_record(kad_record).await?;
+    network
         .start_providing_rtmp_streaming(kad_key.clone(), streaming_key.clone())
-        .await;
-
-    let publish_gossip_result = network
+        .await?;
+    network
         .publish_gossip(kad_key.to_vec(), protocols::gossip::rtmp_keys_gossip())
-        .await;
-    log::trace!(
-        "put_record_result {:?} start_providing_result {:?} publish_gossip_result {:?}",
-        put_record_result,
-        start_providing_result,
-        publish_gossip_result
-    );
-    if put_record_result.is_ok() && start_providing_result.is_ok() && publish_gossip_result.is_ok()
-    {
-        Ok(())
-    } else {
-        let a = put_record_result
-            .err()
-            .map(|e| format!("Error putting record {:?}", e))
-            .into_iter();
-        let b = start_providing_result
-            .err()
-            .map(|e| format!("Error start providing {:?}", e))
-            .into_iter();
-        let c = publish_gossip_result
-            .err()
-            .map(|e| format!("Error publishing gossip {:?}", e))
-            .into_iter();
-        #[allow(unstable_name_collisions)]
-        let d: String = a.chain(b).chain(c).intersperse('\n'.to_string()).collect();
-        Err(anyhow::anyhow!("{}", d))
-    }
+        .await?;
+    Ok(())
 }
 
 pub async fn launch_daemon(
@@ -413,10 +388,10 @@ pub async fn launch_daemon(
                     );
                 }
             };
-            return Err(anyhow::anyhow!(
+            anyhow::bail!(
                 "While was launching rtmp publisher daemon already found a active stream for {:?}",
                 streaming_key
-            ));
+            );
         }
         std::collections::hash_map::Entry::Vacant(entry) => {
             let client = RtmpPublisherClient {
