@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+pub mod dcutr_behaviour;
 pub mod gossip;
 pub mod kademlia_record;
 pub mod payment_info;
+pub mod relay_server;
 pub mod rtmp_streaming;
 pub mod simple_file_exchange;
 
@@ -21,10 +23,11 @@ use libp2p::kad::{
     QueryResult,
 };
 use libp2p::mdns::MdnsEvent;
+use libp2p::relay::v2::relay;
 use libp2p::rendezvous::{self, Cookie};
 use libp2p::request_response::{RequestResponse, RequestResponseEvent};
 use libp2p::swarm::SwarmEvent;
-use libp2p::{gossipsub, multiaddr, ping, PeerId, Swarm};
+use libp2p::{dcutr, gossipsub, multiaddr, ping, PeerId, Swarm};
 use log::{debug, info, warn};
 use rtmp_streaming::{RTMPStreamingRequest, WrappedRTMPStreamingResponseResult};
 use simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
@@ -806,6 +809,8 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             ComposedEvent::Identify(event) => handle_identity(event, opt, swarm),
             ComposedEvent::Ping(event) => handle_ping(event, swarm),
             ComposedEvent::Gossip(event) => gossip::handle_gossip(event, swarm),
+            ComposedEvent::Relay(event) => relay_server::handle(event, swarm),
+            ComposedEvent::Dcutr(event) => dcutr_behaviour::handle(event, swarm),
         },
         SwarmEvent::BannedPeer { peer_id, endpoint } => {
             info!("SwarmEvent::BannedPeer {} at {:?}", peer_id, endpoint);
@@ -899,6 +904,8 @@ pub enum ComposedEvent {
     RendezvousServer(rendezvous::server::Event),
     RendezvousClient(rendezvous::client::Event),
     Gossip(gossipsub::GossipsubEvent),
+    Relay(relay::Event),
+    Dcutr(dcutr::behaviour::Event),
 }
 
 impl From<RequestResponseEvent<SimpleFileRequest, Result<SimpleFileResponse, String>>>
@@ -969,6 +976,18 @@ impl From<gossipsub::GossipsubEvent> for ComposedEvent {
     }
 }
 
+impl From<relay::Event> for ComposedEvent {
+    fn from(event: relay::Event) -> Self {
+        ComposedEvent::Relay(event)
+    }
+}
+
+impl From<dcutr::behaviour::Event> for ComposedEvent {
+    fn from(e: dcutr::behaviour::Event) -> Self {
+        ComposedEvent::Dcutr(e)
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct RendezvousState {
     cookie: Option<Cookie>,
@@ -1020,6 +1039,8 @@ pub struct ComposedBehaviour {
     pub rendezvous_server: rendezvous::server::Behaviour,
     pub rendezvous_client: rendezvous::client::Behaviour,
     pub gossip: gossipsub::Gossipsub,
+    pub relay_server: relay::Relay,
+    pub dcutr: dcutr::behaviour::Behaviour,
     #[behaviour(ignore)]
     pub state: NetworkState,
     #[behaviour(ignore)]

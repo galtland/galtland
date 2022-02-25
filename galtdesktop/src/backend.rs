@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::collections::HashSet;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use galtcore::configuration::Configuration;
@@ -8,6 +9,7 @@ use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::daemons::{self, rtmp_server};
 use galtcore::libp2p::futures::StreamExt;
 use galtcore::libp2p::identity::{self, ed25519};
+use galtcore::libp2p::multiaddr::Protocol;
 use galtcore::libp2p::{self, Multiaddr};
 use galtcore::tokio::sync::mpsc;
 use galtcore::{networkbackendclient, protocols, tokio, utils};
@@ -68,8 +70,16 @@ pub async fn start_command(opt: Cli) -> anyhow::Result<()> {
     if !opt.no_listen {
         let mut listen_addresses = opt.listen_addresses.clone();
         if listen_addresses.is_empty() {
-            listen_addresses.push("/ip4/0.0.0.0/tcp/0".parse().unwrap());
-            listen_addresses.push("/ip6/::/tcp/0".parse().unwrap());
+            listen_addresses.push(
+                Multiaddr::empty()
+                    .with(Protocol::from(Ipv4Addr::UNSPECIFIED))
+                    .with(Protocol::Tcp(0)),
+            );
+            listen_addresses.push(
+                Multiaddr::empty()
+                    .with(Protocol::from(Ipv6Addr::UNSPECIFIED))
+                    .with(Protocol::Tcp(0)),
+            );
         }
         for listen_address in listen_addresses {
             if let Err(e) = swarm.listen_on(listen_address) {

@@ -7,10 +7,11 @@ use libp2p::identify::{Identify, IdentifyConfig};
 use libp2p::identity::{self};
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::{Kademlia, KademliaConfig, KademliaStoreInserts};
+use libp2p::relay::v2::relay;
 use libp2p::rendezvous::{self};
 use libp2p::request_response::{ProtocolSupport, RequestResponse, RequestResponseConfig};
 use libp2p::swarm::SwarmBuilder;
-use libp2p::{ping, PeerId, Swarm};
+use libp2p::{dcutr, ping, PeerId, Swarm};
 
 use super::protocols::payment_info::{PaymentInfoCodec, PaymentInfoProtocol};
 use super::protocols::rtmp_streaming::{RTMPStreamingCodec, RTMPStreamingProtocol};
@@ -99,6 +100,8 @@ pub async fn build(
             state: Default::default(),
             event_sender,
             gossip,
+            relay_server: relay::Relay::new(my_peer_id, Default::default()),
+            dcutr: dcutr::behaviour::Behaviour::new(),
         },
         my_peer_id,
     )
