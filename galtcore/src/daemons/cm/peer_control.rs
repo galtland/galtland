@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use itertools::Itertools;
 use libp2p::PeerId;
 
-use crate::protocols::rtmp_streaming::{RTMPStreamingRequest, RTMPDataSeekType};
+use crate::protocols::rtmp_streaming::{RTMPDataSeekType, RTMPStreamingRequest};
 
 
 struct PeerStreamingRequest {

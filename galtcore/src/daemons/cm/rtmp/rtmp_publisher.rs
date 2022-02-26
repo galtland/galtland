@@ -105,6 +105,7 @@ async fn _rtmp_publisher_daemon(
     let mut video_header: Option<Arc<SignedRtmpData>> = None;
     let mut audio_header: Option<Arc<SignedRtmpData>> = None;
     let mut last_video_keyframe: Option<Arc<SignedRtmpData>> = None;
+    let mut last_video: Option<Arc<SignedRtmpData>> = None;
     let mut last_audio: Option<Arc<SignedRtmpData>> = None;
     let mut consumers: HashMap<PeerId, VecDeque<Arc<SignedRtmpData>>> = HashMap::new();
 
@@ -127,7 +128,7 @@ async fn _rtmp_publisher_daemon(
                 let new_responses = rtmp_data
                     .into_iter()
                     .map(|r| {
-                        let frame_type = RTMPFrameType::frame_type(&r.rtmp_data.data);
+                        let frame_type = RTMPFrameType::classify(&r.rtmp_data.data);
                         let r = Arc::new(r);
                         match frame_type {
                             RTMPFrameType::VideoSequenceHeader => {
@@ -152,6 +153,7 @@ async fn _rtmp_publisher_daemon(
                             }
                             RTMPFrameType::Video => {
                                 log::trace!("Received RTMPFrameType::Video");
+                                last_video.replace(Arc::clone(&r));
                             }
                             RTMPFrameType::KeyAudio => {
                                 log::trace!("Received RTMPFrameType::KeyAudio");
@@ -162,7 +164,7 @@ async fn _rtmp_publisher_daemon(
                                 failure_processing_responses = true;
                             }
                             RTMPFrameType::Other => {
-                                log::warn!("Received RTMPFrameType::Other");
+                                log::info!("Received RTMPFrameType::Other");
                             }
                         };
                         r
@@ -213,8 +215,9 @@ async fn _rtmp_publisher_daemon(
                 let to_send = [
                     &video_header,
                     &audio_header,
-                    &last_audio,
                     &last_video_keyframe,
+                    &last_video,
+                    &last_audio,
                 ]
                 .into_iter()
                 .flatten()
@@ -251,8 +254,9 @@ async fn _rtmp_publisher_daemon(
                 let base_data = [
                     &video_header,
                     &audio_header,
-                    &last_audio,
                     &last_video_keyframe,
+                    &last_video,
+                    &last_audio,
                 ];
                 let peer_responses = consumers.entry(peer).or_insert_with(|| {
                     let new_responses: VecDeque<Arc<SignedRtmpData>> = base_data
@@ -306,8 +310,9 @@ async fn _rtmp_publisher_daemon(
                 let most_recent_frame = [
                     &video_header,
                     &audio_header,
-                    &last_audio,
                     &last_video_keyframe,
+                    &last_video,
+                    &last_audio,
                 ]
                 .into_iter()
                 .flatten()

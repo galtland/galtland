@@ -109,7 +109,7 @@ async fn connection_loop(
                         .into_iter()
                         .map(|r| {
                             stream_offset = max(r.rtmp_data.source_offset, stream_offset);
-                            let frame_type = RTMPFrameType::frame_type(&r.rtmp_data.data);
+                            let frame_type = RTMPFrameType::classify(&r.rtmp_data.data);
                             log::trace!("Received {frame_type:?}");
                             match r.rtmp_data.data_type {
                                 RtmpDataType::Audio => {
@@ -323,13 +323,28 @@ async fn connection_loop(
                                 data
                             );
                         }
+                        let frame_type = RTMPFrameType::classify(&data);
                         log::debug!(
-                            "ServerSessionEvent::AudioDataReceived {} {} {:#04x} {:#04x}",
-                            app_name,
-                            stream_key,
+                            "ServerSessionEvent::AudioDataReceived {} {} {:#04x} {:#04x} {:?}",
+                            &app_name,
+                            &stream_key,
                             data[0],
-                            data[1]
+                            data[1],
+                            frame_type
                         );
+                        match frame_type {
+                            RTMPFrameType::Invalid | RTMPFrameType::Other => {
+                                reader_receiver.close();
+                                stream.shutdown().await?;
+                                reader_daemon_handle.abort();
+                                anyhow::bail!(
+                                    "Unrecognized audio frame type: {frame_type:?} {:#04x} {:#04x} ",
+                                    data[0],
+                                    data[1],
+                                )
+                            }
+                            _ => {}
+                        }
                         let (publisher, record) = match &state {
                             State::Publishing {
                                 app_name: _app_name,
@@ -378,13 +393,28 @@ async fn connection_loop(
                                 data
                             );
                         }
+                        let frame_type = RTMPFrameType::classify(&data);
                         log::debug!(
-                            "ServerSessionEvent::VideoDataReceived {} {} {:#04x} {:#04x}",
+                            "ServerSessionEvent::VideoDataReceived {} {} {:#04x} {:#04x} {:?}",
                             &app_name,
                             &stream_key,
                             data[0],
-                            data[1]
+                            data[1],
+                            frame_type
                         );
+                        match frame_type {
+                            RTMPFrameType::Invalid | RTMPFrameType::Other => {
+                                reader_receiver.close();
+                                stream.shutdown().await?;
+                                reader_daemon_handle.abort();
+                                anyhow::bail!(
+                                    "Unrecognized video frame type: {frame_type:?} {:#04x} {:#04x} ",
+                                    data[0],
+                                    data[1],
+                                )
+                            }
+                            _ => {}
+                        }
                         let (publisher, record) = match &state {
                             State::Publishing {
                                 app_name: _app_name,

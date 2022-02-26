@@ -134,7 +134,7 @@ pub enum RTMPFrameType {
 }
 
 impl RTMPFrameType {
-    pub fn frame_type(data: &Bytes) -> RTMPFrameType {
+    pub fn classify(data: &Bytes) -> RTMPFrameType {
         if data.len() >= 2 {
             match data[0] {
                 0x17 => match data[1] {
