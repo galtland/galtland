@@ -144,7 +144,10 @@ impl RTMPFrameType {
                     0x00 => Self::AudioSequenceHeader,
                     _ => Self::KeyAudio,
                 },
-                _ => Self::Other,
+                other => {
+                    log::debug!("Received RTMPFrameType:Other = {other}");
+                    Self::Other
+                }
             }
         } else {
             Self::Invalid
