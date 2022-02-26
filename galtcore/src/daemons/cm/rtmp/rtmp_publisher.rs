@@ -117,12 +117,13 @@ async fn _rtmp_publisher_daemon(
             Some(RTMPDataClientCommand::NewRTMPData { rtmp_data, sender })
                 if rtmp_data.is_empty() =>
             {
-                log::debug!("Empty rtmp_data received");
+                log::debug!("RTMPDataClientCommand::NewRTMPData empty data received");
                 sender.send(Ok(())).map_err(utils::send_error)?;
                 tokio::task::yield_now().await;
             }
 
             Some(RTMPDataClientCommand::NewRTMPData { rtmp_data, sender }) => {
+                log::debug!("RTMPDataClientCommand::NewRTMPData received");
                 let mut failure_processing_responses = false;
                 let new_responses = rtmp_data
                     .into_iter()
@@ -304,6 +305,7 @@ async fn _rtmp_publisher_daemon(
                 .max_by_key(|r| r.rtmp_data.source_offset)
                 .map(|r| r.as_ref().clone());
                 let to_send = most_recent_frame.into_iter().collect_vec();
+                log::debug!("RTMPDataClientCommand::GetRTMPData seek_type: RTMPDataSeekType::Peek returning {} responses", to_send.len());
                 if sender
                     .send(Ok(RtmpStreamingResponse::Data(to_send)))
                     .is_err()
