@@ -123,7 +123,6 @@ async fn _rtmp_publisher_daemon(
             }
 
             Some(RTMPDataClientCommand::NewRTMPData { rtmp_data, sender }) => {
-                log::debug!("RTMPDataClientCommand::NewRTMPData received");
                 let mut failure_processing_responses = false;
                 let new_responses = rtmp_data
                     .into_iter()
@@ -140,6 +139,7 @@ async fn _rtmp_publisher_daemon(
                                 last_video_keyframe.take();
                             }
                             RTMPFrameType::VideoKeyframe => {
+                                log::debug!("Received RTMPFrameType::VideoKeyframe");
                                 last_video_keyframe.replace(Arc::clone(&r));
                             }
                             RTMPFrameType::AudioSequenceHeader => {
@@ -151,10 +151,16 @@ async fn _rtmp_publisher_daemon(
                                 last_audio.take();
                             }
                             RTMPFrameType::KeyAudio => {
+                                log::debug!("Received RTMPFrameType::KeyAudio");
                                 last_audio.replace(Arc::clone(&r));
                             }
-                            RTMPFrameType::Invalid => failure_processing_responses = true,
-                            RTMPFrameType::Other => {}
+                            RTMPFrameType::Invalid => {
+                                log::warn!("Received RTMPFrameType::Invalid");
+                                failure_processing_responses = true;
+                            }
+                            RTMPFrameType::Other => {
+                                log::warn!("Received RTMPFrameType::Other");
+                            }
                         };
                         r
                     })
