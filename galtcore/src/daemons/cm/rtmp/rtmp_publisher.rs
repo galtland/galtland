@@ -150,6 +150,7 @@ async fn _rtmp_publisher_daemon(
                                 audio_header.replace(Arc::clone(&r));
                                 last_audio.take();
                             }
+                            RTMPFrameType::Video => {}
                             RTMPFrameType::KeyAudio => {
                                 log::debug!("Received RTMPFrameType::KeyAudio");
                                 last_audio.replace(Arc::clone(&r));

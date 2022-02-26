@@ -126,6 +126,7 @@ impl SignedRtmpData {
 pub enum RTMPFrameType {
     VideoSequenceHeader,
     VideoKeyframe,
+    Video,
     AudioSequenceHeader,
     KeyAudio,
     Invalid,
@@ -144,6 +145,7 @@ impl RTMPFrameType {
                     0x00 => Self::AudioSequenceHeader,
                     _ => Self::KeyAudio,
                 },
+                0x27 => Self::Video,
                 other => {
                     log::debug!("Received RTMPFrameType:Other = {other}");
                     Self::Other
