@@ -317,10 +317,18 @@ async fn connection_loop(
                         data,
                         timestamp,
                     } => {
-                        log::trace!(
-                            "ServerSessionEvent::AudioDataReceived {} {}",
+                        if data.len() <= 2 {
+                            anyhow::bail!(
+                                "ServerSessionEvent::AudioDataReceived invalid data {:?}",
+                                data
+                            );
+                        }
+                        log::debug!(
+                            "ServerSessionEvent::AudioDataReceived {} {} {:#04x} {:#04x}",
                             app_name,
-                            stream_key
+                            stream_key,
+                            data[0],
+                            data[1]
                         );
                         let (publisher, record) = match &state {
                             State::Publishing {
@@ -364,10 +372,18 @@ async fn connection_loop(
                         data,
                         timestamp,
                     } => {
-                        log::trace!(
-                            "ServerSessionEvent::VideoDataReceived {} {}",
+                        if data.len() <= 2 {
+                            anyhow::bail!(
+                                "ServerSessionEvent::VideoDataReceived invalid data {:?}",
+                                data
+                            );
+                        }
+                        log::debug!(
+                            "ServerSessionEvent::VideoDataReceived {} {} {:#04x} {:#04x}",
                             &app_name,
-                            &stream_key
+                            &stream_key,
+                            data[0],
+                            data[1]
                         );
                         let (publisher, record) = match &state {
                             State::Publishing {

@@ -142,12 +142,18 @@ impl RTMPFrameType {
                     _ => Self::VideoKeyframe,
                 },
                 0xaf => match data[1] {
+                    // AAC
+                    0x00 => Self::AudioSequenceHeader,
+                    _ => Self::KeyAudio,
+                },
+                0x2f => match data[1] {
+                    // MP3
                     0x00 => Self::AudioSequenceHeader,
                     _ => Self::KeyAudio,
                 },
                 0x27 => Self::Video,
                 other => {
-                    log::debug!("Received RTMPFrameType:Other = {other}");
+                    log::debug!("Received RTMPFrameType:Other = {other:#04x}");
                     Self::Other
                 }
             }
