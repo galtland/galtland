@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use itertools::Itertools;
 use libp2p::PeerId;
 
-use crate::protocols::rtmp_streaming::RTMPStreamingRequest;
+use crate::protocols::rtmp_streaming::{RTMPStreamingRequest, RTMPDataSeekType};
 
 
 struct PeerStreamingRequest {
@@ -92,7 +92,7 @@ impl PeerControl {
                     .iter()
                     .find(|r| r.request.streaming_key == request.streaming_key);
                 if let Some(p) = front {
-                    if p.request == request {
+                    if p.request.seek_type != RTMPDataSeekType::Peek && p.request == request {
                         log::debug!("Blacklisting {peer} because request is repeated: {request:?}");
                         self.blacklist(peer, now);
                         return FloodControlResult::Blacklisted;
