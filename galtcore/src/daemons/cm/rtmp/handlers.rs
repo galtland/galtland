@@ -45,7 +45,7 @@ pub struct PlayRTMPStreamInfo {
     pub sender: oneshot::Sender<anyhow::Result<RtmpPublisherClient>>,
 }
 
-pub async fn publish(
+pub(crate) async fn publish(
     shared_state: SharedGlobalState,
     network: NetworkBackendClient,
     info: PublishRTMPStreamInfo,
@@ -58,13 +58,17 @@ pub async fn publish(
         .lock()
         .await
         .remove(streaming_key)
-        .iter()
-        .for_each(|h| {
+        .into_iter()
+        .for_each(|s| {
             log::info!(
                 "Aborting stream seeker for {:?} to be able to publish",
                 streaming_key
             );
-            h.abort();
+            if s.send(()).is_err() {
+                log::warn!(
+                    "While aborting: stream seeker for {streaming_key:?} seems to be already dead"
+                );
+            }
         });
     let daemon_sender = shared_state
         .active_streams
@@ -93,7 +97,7 @@ pub async fn publish(
     Ok(())
 }
 
-pub async fn respond(
+pub(crate) async fn respond(
     opt: Configuration,
     identity: NodeIdentity,
     shared_state: SharedGlobalState,
@@ -220,7 +224,7 @@ pub async fn respond(
     Ok(())
 }
 
-pub async fn play(
+pub(crate) async fn play(
     identity: NodeIdentity,
     shared_state: SharedGlobalState,
     network: NetworkBackendClient,

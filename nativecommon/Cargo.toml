@@ -1,0 +1,25 @@
+[package]
+name = "nativecommon"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+galtcore = { path="../galtcore" }
+
+anyhow = "1.0.55"
+libp2p = { version = "0.43", features = [
+    "dns-tokio",
+    # "mdns",
+    "tcp-tokio",
+    "websocket",
+    ] }
+tokio = { version = "1", features = ["full", "tracing"] }
+
+rml_rtmp = "0.6"
+bytes = "1.1.0"
+log = "0.4.14"
+chrono = "0.4.19"
+
+webrtc = "0.4"

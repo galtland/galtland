@@ -4,7 +4,16 @@
 members = [
     "galtcli",
     "galtdesktop",
+    "galtbrowser",
     "galtcore",
-    "appcommon"
+    "appcommon",
+    "nativecommon"
 ]
+
+[patch.crates-io]
+dtls = { package = "webrtc-dtls", git = "https://github.com/webrtc-rs/dtls" }
+
+[profile.release]
+# Tell `rustc` to optimize for small code size.
+opt-level = "s"
 

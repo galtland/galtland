@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -9,17 +10,16 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
-use galtcore::daemons::{self, rtmp_server};
 use galtcore::libp2p::futures::StreamExt;
 use galtcore::libp2p::identity::{self, ed25519};
 use galtcore::libp2p::multiaddr::Protocol;
 use galtcore::libp2p::{self, Multiaddr};
-use galtcore::tokio::sync::mpsc;
-use galtcore::{networkbackendclient, protocols, tokio, utils};
+use galtcore::tokio::sync::{broadcast, mpsc};
+use galtcore::{daemons, networkbackendclient, protocols, tokio, utils};
 use log::{info, warn};
+use nativecommon::rtmp_server;
 use service::sm;
 use tonic::transport::Uri;
-
 
 pub mod service;
 
@@ -81,8 +81,18 @@ async fn start_command(
 
     // It's unbounded because we can' block the main loop (but of course we can drop events on the receive side)
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
-    let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> =
-        galtcore::swarm::build(configuration.clone(), keypair, event_sender).await;
+    let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
+    let (webrtc_signaling_sender, webrtc_signaling_receiver) = mpsc::unbounded_channel();
+    let transport = nativecommon::transport::our_transport(&keypair).await?;
+    let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
+        configuration.clone(),
+        keypair,
+        event_sender,
+        broadcast_event_sender,
+        webrtc_signaling_sender,
+        transport,
+    )
+    .await;
 
     let (network_backend_command_sender, mut network_backend_command_receiver) = mpsc::channel(10);
 
@@ -90,6 +100,11 @@ async fn start_command(
 
     let networkbackendclient =
         networkbackendclient::NetworkBackendClient::new(network_backend_command_sender);
+
+    utils::spawn_and_log_error(nativecommon::webrtc::WebRtc::webrtc_signaling_loop(
+        webrtc_signaling_receiver,
+        networkbackendclient.clone(),
+    ));
 
     if !opt.no_listen {
         let mut listen_addresses = opt.listen_addresses.clone();
@@ -103,6 +118,18 @@ async fn start_command(
                 Multiaddr::empty()
                     .with(Protocol::from(Ipv6Addr::UNSPECIFIED))
                     .with(Protocol::Tcp(0)),
+            );
+            listen_addresses.push(
+                Multiaddr::empty()
+                    .with(Protocol::from(Ipv4Addr::LOCALHOST))
+                    .with(Protocol::Tcp(8085))
+                    .with(Protocol::Ws(Cow::Borrowed("/"))),
+            );
+            listen_addresses.push(
+                Multiaddr::empty()
+                    .with(Protocol::from(Ipv4Addr::UNSPECIFIED))
+                    .with(Protocol::Tcp(8086))
+                    .with(Protocol::Wss(Cow::Borrowed("/"))),
             );
         }
         for listen_address in listen_addresses {
@@ -133,7 +160,6 @@ async fn start_command(
         }
     }
 
-
     utils::spawn_and_log_error(daemons::cm::run_loop(
         configuration.clone(),
         networkbackendclient.clone(),
@@ -162,6 +188,7 @@ async fn start_command(
 
     utils::spawn_and_log_error(daemons::internal_network_events::run_loop(
         event_receiver,
+        broadcast_event_receiver,
         highlevel_command_sender.clone(),
         gossip_listener_client.clone(),
     ));

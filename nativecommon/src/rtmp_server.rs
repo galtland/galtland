@@ -6,6 +6,16 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
+use galtcore::daemons::cm::rtmp::handlers::{PlayRTMPStreamInfo, PublishRTMPStreamInfo};
+use galtcore::daemons::cm::rtmp::rtmp_publisher::RtmpPublisherClient;
+use galtcore::daemons::cm::ClientCommand;
+use galtcore::protocols::kademlia_record::RtmpStreamingRecord;
+use galtcore::protocols::rtmp_streaming::{
+    RTMPDataSeekType, RTMPFrameType, RtmpData, RtmpDataType, RtmpStreamingKey,
+    RtmpStreamingResponse, SignedRtmpData, StreamOffset,
+};
+use galtcore::protocols::NodeIdentity;
+use galtcore::utils::{self, spawn_and_log_error};
 use libp2p::bytes::BytesMut;
 use libp2p::PeerId;
 use rml_rtmp::chunk_io::Packet;
@@ -19,17 +29,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
-
-use super::cm::rtmp::rtmp_publisher::RtmpPublisherClient;
-use crate::daemons::cm::rtmp::handlers::{PlayRTMPStreamInfo, PublishRTMPStreamInfo};
-use crate::daemons::cm::ClientCommand;
-use crate::protocols::kademlia_record::RtmpStreamingRecord;
-use crate::protocols::rtmp_streaming::{
-    RTMPDataSeekType, RTMPFrameType, RtmpData, RtmpDataType, RtmpStreamingKey,
-    RtmpStreamingResponse, SignedRtmpData, StreamOffset,
-};
-use crate::protocols::NodeIdentity;
-use crate::utils::{self, spawn_and_log_error};
 
 pub async fn accept_loop(
     addr: SocketAddr,
@@ -82,7 +81,7 @@ async fn connection_loop(
     let (read_stream, stream) = tokio::io::split(stream);
     let mut stream = BufWriter::new(stream);
     let (reader_sender, mut reader_receiver) = mpsc::channel::<Bytes>(10);
-    let reader_daemon_handle =
+    let _reader_daemon_handle =
         spawn_and_log_error(connection_reader_daemon(read_stream, reader_sender));
 
     loop {
@@ -235,7 +234,7 @@ async fn connection_loop(
                             Err(e) => {
                                 reader_receiver.close();
                                 stream.shutdown().await?;
-                                reader_daemon_handle.abort();
+                                // reader_daemon_handle.abort();
                                 anyhow::bail!("Error converting stream key to peer id: {}", e);
                             }
                         };
@@ -243,7 +242,7 @@ async fn connection_loop(
                         if stream_key != peer_id {
                             reader_receiver.close();
                             stream.shutdown().await?;
-                            reader_daemon_handle.abort();
+                            // reader_daemon_handle.abort();
                             anyhow::bail!(
                                 "We only accept publish for stream key: {peer_id} but received for: {stream_key}"
                             );
@@ -269,7 +268,7 @@ async fn connection_loop(
                         {
                             reader_receiver.close();
                             stream.shutdown().await?;
-                            reader_daemon_handle.abort();
+                            // reader_daemon_handle.abort();
                             anyhow::bail!("receiver died")
                         };
 
@@ -278,7 +277,7 @@ async fn connection_loop(
                             _ => {
                                 reader_receiver.close();
                                 stream.shutdown().await?;
-                                reader_daemon_handle.abort();
+                                // reader_daemon_handle.abort();
                                 anyhow::bail!("Aborting because publish failed");
                             }
                         };
@@ -336,7 +335,7 @@ async fn connection_loop(
                             RTMPFrameType::Invalid | RTMPFrameType::Other => {
                                 reader_receiver.close();
                                 stream.shutdown().await?;
-                                reader_daemon_handle.abort();
+                                // reader_daemon_handle.abort();
                                 anyhow::bail!(
                                     "Unrecognized audio frame type: {frame_type:?} {:#04x} {:#04x} ",
                                     data[0],
@@ -376,7 +375,7 @@ async fn connection_loop(
                         if publisher.feed_data(rtmp_data).await.is_err() {
                             reader_receiver.close();
                             stream.shutdown().await?;
-                            reader_daemon_handle.abort();
+                            // reader_daemon_handle.abort();
                             anyhow::bail!("Aborting because sending data failed");
                         };
                         source_sequence_id += 1;
@@ -406,7 +405,7 @@ async fn connection_loop(
                             RTMPFrameType::Invalid | RTMPFrameType::Other => {
                                 reader_receiver.close();
                                 stream.shutdown().await?;
-                                reader_daemon_handle.abort();
+                                // reader_daemon_handle.abort();
                                 anyhow::bail!(
                                     "Unrecognized video frame type: {frame_type:?} {:#04x} {:#04x} ",
                                     data[0],
@@ -446,7 +445,7 @@ async fn connection_loop(
                         if publisher.feed_data(rtmp_data).await.is_err() {
                             reader_receiver.close();
                             stream.shutdown().await?;
-                            reader_daemon_handle.abort();
+                            // reader_daemon_handle.abort();
                             anyhow::bail!("Aborting because sending data failed");
                         };
                         source_sequence_id += 1;
@@ -564,7 +563,7 @@ async fn connection_loop(
     }
 }
 
-pub async fn start_handshake(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+pub(crate) async fn start_handshake(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
     let mut handshake = Handshake::new(PeerType::Server);
     let server_p0_and_1 = handshake.generate_outbound_p0_and_p1()?;
     stream.write_all(&server_p0_and_1).await?;

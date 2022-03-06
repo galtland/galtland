@@ -2,10 +2,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use itertools::Itertools;
-use libp2p::gossipsub::error::PublishError;
+// use libp2p::gossipsub::error::PublishError;
 use libp2p::PeerId;
 use log::debug;
 use tokio::sync::mpsc::{self};
@@ -34,7 +33,7 @@ enum RTMPDataClientCommand {
         sender: oneshot::Sender<RTMPStreamingResponseResult>,
     },
     GetLastSent {
-        sender: oneshot::Sender<SystemTime>,
+        sender: oneshot::Sender<instant::Instant>,
     },
     Die {
         sender: oneshot::Sender<()>,
@@ -73,7 +72,7 @@ impl RtmpPublisherClient {
         Ok(receiver.await?)
     }
 
-    pub async fn get_last_sent(&self) -> anyhow::Result<SystemTime> {
+    pub async fn get_last_sent(&self) -> anyhow::Result<instant::Instant> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(RTMPDataClientCommand::GetLastSent { sender })
@@ -109,7 +108,7 @@ async fn _rtmp_publisher_daemon(
     let mut last_audio: Option<Arc<SignedRtmpData>> = None;
     let mut consumers: HashMap<PeerId, VecDeque<Arc<SignedRtmpData>>> = HashMap::new();
 
-    let mut last_sent = SystemTime::now();
+    let mut last_sent = instant::Instant::now();
     let mut published = false;
 
     loop {
@@ -230,7 +229,7 @@ async fn _rtmp_publisher_daemon(
                     peer,
                 );
                 if !to_send.is_empty() {
-                    last_sent = SystemTime::now();
+                    last_sent = instant::Instant::now();
                 }
                 if sender
                     .send(Ok(RtmpStreamingResponse::Data(to_send)))
@@ -287,7 +286,7 @@ async fn _rtmp_publisher_daemon(
                     .take(rtmp_streaming::MAX_RESPONSES_PER_REQUEST)
                     .collect_vec();
                 if !to_send.is_empty() {
-                    last_sent = SystemTime::now();
+                    last_sent = instant::Instant::now();
                 }
                 if sender
                     .send(Ok(RtmpStreamingResponse::Data(to_send)))
@@ -371,18 +370,22 @@ async fn publisher_publish(
     network
         .start_providing_rtmp_streaming(kad_key.clone(), streaming_key.clone())
         .await?;
-    match network
+    // match network
+    //     .publish_gossip(kad_key.to_vec(), protocols::gossip::rtmp_keys_gossip())
+    //     .await?
+    // {
+    //     Ok(_) => {}
+    //     Err(PublishError::Duplicate) => {} // it's okay
+    //     Err(e) => anyhow::bail!("Publish error: {e:?}"),
+    // };
+    network
         .publish_gossip(kad_key.to_vec(), protocols::gossip::rtmp_keys_gossip())
-        .await?
-    {
-        Ok(_) => {}
-        Err(PublishError::Duplicate) => {} // it's okay
-        Err(e) => anyhow::bail!("Publish error: {e:?}"),
-    };
+        .await?;
+
     Ok(())
 }
 
-pub async fn launch_daemon(
+pub(crate) async fn launch_daemon(
     streaming_key: RtmpStreamingKey,
     shared_state: SharedGlobalState,
     network: NetworkBackendClient,

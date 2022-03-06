@@ -122,7 +122,7 @@ impl RequestResponseCodec for SimpleFileExchangeCodec {
     }
 }
 
-pub fn handle_event(
+pub(crate) fn handle_event(
     event: RequestResponseEvent<SimpleFileRequest, Result<SimpleFileResponse, String>>,
     swarm: &mut Swarm<ComposedBehaviour>,
 ) {

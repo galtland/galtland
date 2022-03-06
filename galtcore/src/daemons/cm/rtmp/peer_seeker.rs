@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use itertools::Itertools;
 use libp2p::PeerId;
@@ -18,12 +18,13 @@ use crate::protocols::rtmp_streaming::{
 use crate::protocols::{NodeIdentity, PeerStatistics};
 use crate::utils::{self, spawn_and_log_error, ArcMutex};
 
-pub fn launch_daemon(
+pub(crate) fn launch_daemon(
     identity: NodeIdentity,
     shared_global_state: SharedGlobalState,
     network: NetworkBackendClient,
     streaming_key: RtmpStreamingKey,
-) -> (tokio::task::JoinHandle<()>, PeerSeekerClient) {
+    // ) -> (tokio::task::JoinHandle<()>, PeerSeekerClient) {
+) -> ((), PeerSeekerClient) {
     // TODO: perhaps receive internal network events
     let (sender, receiver) = mpsc::channel(2);
     let handle = spawn_and_log_error({
@@ -38,7 +39,7 @@ pub struct PeerSeekerClient {
 }
 
 impl PeerSeekerClient {
-    pub async fn get_peers(&self) -> anyhow::Result<Vec<PeerId>> {
+    pub(crate) async fn get_peers(&self) -> anyhow::Result<Vec<PeerId>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(SeekerCommands::GetPeers { sender })
@@ -48,7 +49,11 @@ impl PeerSeekerClient {
         Ok(receiver.await.map_err(utils::send_error)?)
     }
 
-    async fn temporarily_ban(&self, peer: PeerId, expire_time: SystemTime) -> anyhow::Result<()> {
+    async fn temporarily_ban(
+        &self,
+        peer: PeerId,
+        expire_time: instant::Instant,
+    ) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(SeekerCommands::TemporarilyBanPeer {
@@ -63,7 +68,7 @@ impl PeerSeekerClient {
         Ok(())
     }
 
-    pub async fn ban(&self, peer: PeerId) -> anyhow::Result<()> {
+    pub(crate) async fn ban(&self, peer: PeerId) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(SeekerCommands::PermanentlyBanPeer { peer, sender })
@@ -74,26 +79,26 @@ impl PeerSeekerClient {
         Ok(())
     }
 
-    pub async fn ban_on_recoverable_error(&self, peer: PeerId) -> anyhow::Result<()> {
+    pub(crate) async fn ban_on_recoverable_error(&self, peer: PeerId) -> anyhow::Result<()> {
         self.temporarily_ban(
             peer,
-            SystemTime::now() + PeerSeeker::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
+            instant::Instant::now() + PeerSeeker::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
         )
         .await
     }
 
-    pub async fn ban_on_flood(&self, peer: PeerId) -> anyhow::Result<()> {
+    pub(crate) async fn ban_on_flood(&self, peer: PeerId) -> anyhow::Result<()> {
         self.temporarily_ban(
             peer,
-            SystemTime::now() + PeerSeeker::BLACKLIST_DURATION_ON_FLOOD,
+            instant::Instant::now() + PeerSeeker::BLACKLIST_DURATION_ON_FLOOD,
         )
         .await
     }
 
-    pub async fn ban_on_max_upload(&self, peer: PeerId) -> anyhow::Result<()> {
+    pub(crate) async fn ban_on_max_upload(&self, peer: PeerId) -> anyhow::Result<()> {
         self.temporarily_ban(
             peer,
-            SystemTime::now() + PeerSeeker::BLACKLIST_DURATION_ON_MAX_UPLOAD,
+            instant::Instant::now() + PeerSeeker::BLACKLIST_DURATION_ON_MAX_UPLOAD,
         )
         .await
     }
@@ -106,7 +111,7 @@ enum SeekerCommands {
     },
     TemporarilyBanPeer {
         peer: PeerId,
-        expire_time: SystemTime,
+        expire_time: instant::Instant,
         sender: oneshot::Sender<()>,
     },
     PermanentlyBanPeer {
@@ -118,14 +123,14 @@ enum SeekerCommands {
 enum PeerState {
     Inactive,
     Blacklisted,
-    TemporarilyBlacklisted(SystemTime),
+    TemporarilyBlacklisted(instant::Instant),
     Empty,
     Active(StreamOffset),
 }
 
 enum PeerUpdateState {
     Idle,
-    UpdatingInfo(tokio::task::JoinHandle<()>),
+    UpdatingInfo(oneshot::Sender<()>),
 }
 
 #[derive(Default)]
@@ -150,7 +155,7 @@ impl PeerSeeker {
     pub const BLACKLIST_DURATION_ON_RECOVERABLE_ERROR: Duration = Duration::from_secs(15);
     const MAX_BEST_PEERS: usize = 2;
 
-    pub fn new(
+    pub(crate) fn new(
         identity: NodeIdentity,
         shared_global_state: SharedGlobalState,
         network: NetworkBackendClient,
@@ -228,7 +233,7 @@ impl PeerSeeker {
             } => {
                 log::debug!("SeekerCommands::TemporarilyBanPeer {peer} {expire_time:?} for {streaming_key:?}");
                 let mut state = self.peer_shared_state.lock().await;
-                Self::try_abort_update(&peer, &mut state);
+                Self::try_abort_update(&peer, &mut state).await;
                 state
                     .peers
                     .insert(peer, PeerState::TemporarilyBlacklisted(expire_time));
@@ -236,7 +241,7 @@ impl PeerSeeker {
             }
             SeekerCommands::PermanentlyBanPeer { peer, sender } => {
                 let mut state = self.peer_shared_state.lock().await;
-                Self::try_abort_update(&peer, &mut state);
+                Self::try_abort_update(&peer, &mut state).await;
                 state.peers.insert(peer, PeerState::Blacklisted);
                 sender.send(()).map_err(utils::send_error)?;
             }
@@ -244,14 +249,16 @@ impl PeerSeeker {
         Ok(())
     }
 
-    fn try_abort_update<'a>(
+    async fn try_abort_update<'a>(
         peer: &PeerId,
         state: &mut tokio::sync::MutexGuard<'a, PeersSharedState>,
     ) {
-        if let Some(PeerUpdateState::UpdatingInfo(handle)) = state.peer_update_state.get_mut(peer) {
-            handle.abort();
-            state.peer_update_state.insert(*peer, PeerUpdateState::Idle);
+        if let Some(PeerUpdateState::UpdatingInfo(sender)) = state.peer_update_state.remove(peer) {
+            if sender.send(()).is_err() {
+                log::warn!("update process for {peer} died before abort");
+            }
         }
+        state.peer_update_state.insert(*peer, PeerUpdateState::Idle);
     }
 
     fn peer_maintenance(&mut self) -> anyhow::Result<()> {
@@ -301,7 +308,7 @@ impl PeerSeeker {
                                 log::debug!("Fastest {p} with {stats:?} already on list of peers");
                             }
                         };
-                        let now = SystemTime::now();
+                        let now = instant::Instant::now();
                         for peer in peers {
                             if let PeerState::TemporarilyBlacklisted(t) =
                                 state.peers.entry(peer).or_insert(PeerState::Inactive)
@@ -319,15 +326,46 @@ impl PeerSeeker {
                                     state.peers[&peer],
                                     PeerState::Active(_) | PeerState::Inactive | PeerState::Empty
                                 ) {
-                                    let v = PeerUpdateState::UpdatingInfo(spawn_and_log_error(
-                                        Self::update_peer(
-                                            shared_global_state.clone(),
-                                            peer_shared_state.clone(),
-                                            network.clone(),
-                                            streaming_key.clone(),
-                                            peer,
-                                        ),
-                                    ));
+                                    let v = {
+                                        let (abort_sender, mut abort_receiver) = oneshot::channel();
+                                        spawn_and_log_error({
+                                            let peer_shared_state = peer_shared_state.clone();
+                                            let shared_global_state = shared_global_state.clone();
+                                            let network = network.clone();
+                                            let streaming_key = streaming_key.clone();
+                                            async move {
+                                                let r = Self::update_peer(
+                                                    shared_global_state,
+                                                    network,
+                                                    streaming_key,
+                                                    peer,
+                                                )
+                                                .await;
+                                                let mut state = peer_shared_state.lock().await;
+                                                if abort_receiver.try_recv().is_ok() {
+                                                    log::info!(
+                                                        "Received abort for peer update {peer}, exiting..."
+                                                    );
+                                                    return Ok(());
+                                                }
+                                                match r {
+                                                    Ok(result) => {
+                                                        state.peers.insert(peer, result);
+                                                    }
+                                                    Err(e) => {
+                                                        log::warn!(
+                                                            "Got {e:?} while updating {peer}"
+                                                        )
+                                                    }
+                                                };
+                                                state
+                                                    .peer_update_state
+                                                    .insert(peer, PeerUpdateState::Idle);
+                                                Ok(())
+                                            }
+                                        });
+                                        PeerUpdateState::UpdatingInfo(abort_sender)
+                                    };
                                     state.peer_update_state.insert(peer, v);
                                 };
                             };
@@ -343,11 +381,10 @@ impl PeerSeeker {
 
     async fn update_peer(
         shared_global_state: SharedGlobalState,
-        peer_shared_state: ArcMutex<PeersSharedState>,
         mut network: NetworkBackendClient,
         streaming_key: RtmpStreamingKey,
         peer: PeerId,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PeerState> {
         let result = if shared_global_state
             .peer_control
             .lock()
@@ -382,25 +419,25 @@ impl PeerSeeker {
                 Ok(Ok(RtmpStreamingResponse::MaxUploadRateReached)) => {
                     log::info!("Got RTMPStreamingResponse::MaxUploadRateReached for peer {peer}, temporarily blacklisting...");
                     PeerState::TemporarilyBlacklisted(
-                        SystemTime::now() + Self::BLACKLIST_DURATION_ON_MAX_UPLOAD,
+                        instant::Instant::now() + Self::BLACKLIST_DURATION_ON_MAX_UPLOAD,
                     )
                 }
                 Ok(Ok(RtmpStreamingResponse::TooMuchFlood)) => {
                     log::warn!("Got RTMPStreamingResponse::TooMuchFlood for peer {peer}, temporarily blacklisting...");
                     PeerState::TemporarilyBlacklisted(
-                        SystemTime::now() + Self::BLACKLIST_DURATION_ON_FLOOD,
+                        instant::Instant::now() + Self::BLACKLIST_DURATION_ON_FLOOD,
                     )
                 }
                 Ok(Err(e)) => {
                     log::warn!("Got error {e} for peer {peer}, temporarily blacklisting...");
                     PeerState::TemporarilyBlacklisted(
-                        SystemTime::now() + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
+                        instant::Instant::now() + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
                     )
                 }
                 Err(e) => {
                     log::warn!("Got error {e} for peer {peer}, temporarily blacklisting...");
                     PeerState::TemporarilyBlacklisted(
-                        SystemTime::now() + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
+                        instant::Instant::now() + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
                     )
                 }
             }
@@ -409,12 +446,9 @@ impl PeerSeeker {
                 "Peer {peer} is on global blacklist for requests, temporarily blacklisting..."
             );
             PeerState::TemporarilyBlacklisted(
-                SystemTime::now() + Self::BLACKLIST_DURATION_ON_GLOBAL_BAN,
+                instant::Instant::now() + Self::BLACKLIST_DURATION_ON_GLOBAL_BAN,
             )
         };
-        let mut state = peer_shared_state.lock().await;
-        state.peers.insert(peer, result);
-        state.peer_update_state.insert(peer, PeerUpdateState::Idle);
-        Ok(())
+        Ok(result)
     }
 }

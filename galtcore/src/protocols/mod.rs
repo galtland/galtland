@@ -7,6 +7,7 @@ pub mod payment_info;
 pub mod relay_server;
 pub mod rtmp_streaming;
 pub mod simple_file_exchange;
+pub mod webrtc_signaling;
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -22,55 +23,56 @@ use libp2p::kad::{
     AddProviderOk, GetProvidersError, Kademlia, KademliaEvent, PutRecordError, PutRecordOk,
     QueryResult,
 };
-use libp2p::mdns::MdnsEvent;
+// use libp2p::mdns::MdnsEvent;
 use libp2p::relay::v2::relay;
 use libp2p::rendezvous::{self, Cookie};
 use libp2p::request_response::{RequestResponse, RequestResponseEvent};
 use libp2p::swarm::SwarmEvent;
-use libp2p::{dcutr, gossipsub, multiaddr, ping, PeerId, Swarm};
+use libp2p::{dcutr, floodsub, multiaddr, ping, PeerId, Swarm};
 use log::{debug, info, warn};
 use rtmp_streaming::{RTMPStreamingRequest, WrappedRTMPStreamingResponseResult};
 use simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use self::payment_info::{PaymentInfoRequest, PaymentInfoResponseResult};
 use self::rtmp_streaming::RTMPStreamingResponseResult;
+use self::webrtc_signaling::{SignalingRequest, WebRtcSignalingResponseResult};
 use crate::configuration::Configuration;
-use crate::daemons::internal_network_events::InternalNetworkEvent;
+use crate::daemons::internal_network_events::{BroadcastableNetworkEvent, InternalNetworkEvent};
 use crate::networkbackendclient::{NetworkBackendCommand, RequestRTMPDataParams};
 use crate::utils;
 
 pub const RENDEZVOUS_NAMESPACE: &str = "rendezvous";
 
-pub fn handle_mdns_event(event: MdnsEvent, _swarm: &mut Swarm<ComposedBehaviour>) {
-    match event {
-        MdnsEvent::Discovered(_list) => {
-            // let mut added_new_peers = false;
-            // for (peer_id, multiaddr) in list {
-            //     info!("MdnsEvent::Discovered {} at {}", peer_id, multiaddr);
-            //     added_new_peers = true;
-            //     swarm
-            //         .behaviour_mut()
-            //         .kademlia
-            //         .add_address(&peer_id, multiaddr);
-            // }
-            // if added_new_peers {
-            //     swarm
-            //         .behaviour_mut()
-            //         .kademlia
-            //         .bootstrap()
-            //         .expect("be able to start bootstrap process");
-            // }
-        }
-        MdnsEvent::Expired(expired) => {
-            for (peer, addr) in expired {
-                info!("Expired {} at {}", peer, addr);
-            }
-        }
-    }
-}
+// pub(crate) fn handle_mdns_event(event: MdnsEvent, _swarm: &mut Swarm<ComposedBehaviour>) {
+//     match event {
+//         MdnsEvent::Discovered(_list) => {
+//             let mut added_new_peers = false;
+//             for (peer_id, multiaddr) in list {
+//                 info!("MdnsEvent::Discovered {} at {}", peer_id, multiaddr);
+//                 added_new_peers = true;
+//                 swarm
+//                     .behaviour_mut()
+//                     .kademlia
+//                     .add_address(&peer_id, multiaddr);
+//             }
+//             if added_new_peers {
+//                 swarm
+//                     .behaviour_mut()
+//                     .kademlia
+//                     .bootstrap()
+//                     .expect("be able to start bootstrap process");
+//             }
+//         }
+//         MdnsEvent::Expired(expired) => {
+//             for (peer, addr) in expired {
+//                 info!("Expired {} at {}", peer, addr);
+//             }
+//         }
+//     }
+// }
 
-pub fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<ComposedBehaviour>) {
+pub(crate) fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<ComposedBehaviour>) {
     match message {
         KademliaEvent::OutboundQueryCompleted { id, result, .. } => match result {
             QueryResult::GetProviders(Ok(ok)) => {
@@ -172,10 +174,10 @@ pub fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<ComposedB
                 sender.send(Ok(())).expect("Receiver not to be dropped");
                 if let Err(e) = swarm
                     .behaviour_mut()
-                    .event_sender
-                    .send(InternalNetworkEvent::PutRecord { record })
+                    .broadcast_event_sender
+                    .send(BroadcastableNetworkEvent::PutRecord { record })
                 {
-                    log::warn!("Error sending InternalNetworkEvent::PutRecord: {}", e);
+                    log::warn!("Error sending BroadcastableNetworkEvent::PutRecord: {}", e);
                 }
             }
             QueryResult::PutRecord(Err(PutRecordError::QuorumFailed { key, .. })) => {
@@ -299,7 +301,7 @@ pub fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<ComposedB
                         .kademlia
                         .store_mut()
                         .put(record)
-                        .expect("to succeed"),
+                        .expect("to succeed"), // FIXME: the data store should be way bigger and handle out of memory gracefully
                     Err(e) => log::warn!("Ignoring invalid record {:?}: {}", record, e),
                 };
             }
@@ -326,7 +328,7 @@ pub fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<ComposedB
     }
 }
 
-pub fn handle_rendezvous_server(event: rendezvous::server::Event) {
+pub(crate) fn handle_rendezvous_server(event: rendezvous::server::Event) {
     match event {
         rendezvous::server::Event::DiscoverServed {
             enquirer,
@@ -369,7 +371,7 @@ pub fn handle_rendezvous_server(event: rendezvous::server::Event) {
     }
 }
 
-pub fn handle_rendezvous_client(
+pub(crate) fn handle_rendezvous_client(
     event: rendezvous::client::Event,
     swarm: &mut Swarm<ComposedBehaviour>,
 ) {
@@ -452,7 +454,7 @@ pub fn handle_rendezvous_client(
     }
 }
 
-pub fn handle_identity(
+pub(crate) fn handle_identity(
     event: IdentifyEvent,
     opt: &Configuration,
     swarm: &mut Swarm<ComposedBehaviour>,
@@ -483,7 +485,7 @@ pub fn handle_identity(
     }
 }
 
-pub fn handle_ping(event: ping::Event, swarm: &mut Swarm<ComposedBehaviour>) {
+pub(crate) fn handle_ping(event: ping::Event, swarm: &mut Swarm<ComposedBehaviour>) {
     match event.result {
         Ok(ping::Success::Ping { rtt }) => {
             log::debug!("Success ping {:?} to {}", rtt, event.peer);
@@ -676,10 +678,14 @@ pub fn handle_network_backend_command(
             data,
             topic,
             sender,
-        } => match swarm.behaviour_mut().gossip.publish(topic, data) {
-            Ok(_) => sender.send(Ok(())).map_err(utils::send_error)?,
-            Err(e) => sender.send(Err(e)).map_err(utils::send_error)?,
-        },
+        } => {
+            //     match swarm.behaviour_mut().gossip.publish(topic, data) {
+            //     Ok(_) => sender.send(Ok(())).map_err(utils::send_error)?,
+            //     Err(e) => sender.send(Err(e)).map_err(utils::send_error)?,
+            // }
+            swarm.behaviour_mut().gossip.publish(topic, data);
+            sender.send(()).map_err(utils::send_error)?;
+        }
         NetworkBackendCommand::StopProviding { kad_key, sender } => {
             swarm.behaviour_mut().kademlia.stop_providing(&kad_key);
             sender.send(()).map_err(utils::send_error)?;
@@ -687,6 +693,27 @@ pub fn handle_network_backend_command(
         NetworkBackendCommand::RemoveRecord { kad_key, sender } => {
             swarm.behaviour_mut().kademlia.remove_record(&kad_key);
             sender.send(()).map_err(utils::send_error)?;
+        }
+        NetworkBackendCommand::RespondWebRtcSignaling { response, channel } => {
+            if swarm
+                .behaviour_mut()
+                .webrtc_signaling
+                .send_response(channel, response)
+                .is_err()
+            {
+                log::warn!("Expected connection to peer to be still open while sending response");
+            };
+        }
+        NetworkBackendCommand::RequestWebRtcSignaling {
+            request,
+            peer,
+            sender,
+        } => {
+            let b = swarm.behaviour_mut();
+            let request_id = b.webrtc_signaling.send_request(&peer, request);
+            b.state
+                .pending_webrtc_signaling_request
+                .insert(request_id, sender);
         }
     };
     Ok(())
@@ -774,6 +801,15 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                         .rendezvous_peers
                         .insert(peer_id, Default::default());
                 }
+
+                if swarm
+                    .behaviour_mut()
+                    .broadcast_event_sender
+                    .send(BroadcastableNetworkEvent::ConnectionEstablished { peer: peer_id })
+                    .is_err()
+                {
+                    log::warn!("Error sending BroadcastableNetworkEvent::ConnectionEstablished {{ {peer_id} }}");
+                }
             }
         }
         SwarmEvent::ConnectionClosed {
@@ -803,7 +839,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             ComposedEvent::RTMPStreaming(event) => rtmp_streaming::handle_event(event, swarm),
             ComposedEvent::PaymentInfo(event) => payment_info::handlers::handle_event(event, swarm),
             ComposedEvent::Kademlia(event) => handle_kademlia_event(event, swarm),
-            ComposedEvent::Mdns(event) => handle_mdns_event(event, swarm),
+            // ComposedEvent::Mdns(event) => handle_mdns_event(event, swarm),
             ComposedEvent::RendezvousServer(event) => handle_rendezvous_server(event),
             ComposedEvent::RendezvousClient(event) => handle_rendezvous_client(event, swarm),
             ComposedEvent::Identify(event) => handle_identity(event, opt, swarm),
@@ -811,6 +847,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             ComposedEvent::Gossip(event) => gossip::handle_gossip(event, swarm),
             ComposedEvent::Relay(event) => relay_server::handle(event, swarm),
             ComposedEvent::Dcutr(event) => dcutr_behaviour::handle(event, swarm),
+            ComposedEvent::WebRtcSignaling(event) => webrtc_signaling::handle_event(event, swarm),
         },
         SwarmEvent::BannedPeer { peer_id, endpoint } => {
             info!("SwarmEvent::BannedPeer {} at {:?}", peer_id, endpoint);
@@ -897,13 +934,15 @@ pub enum ComposedEvent {
     SimpleFile(RequestResponseEvent<SimpleFileRequest, Result<SimpleFileResponse, String>>),
     RTMPStreaming(RequestResponseEvent<RTMPStreamingRequest, WrappedRTMPStreamingResponseResult>),
     PaymentInfo(RequestResponseEvent<PaymentInfoRequest, PaymentInfoResponseResult>),
+    WebRtcSignaling(RequestResponseEvent<SignalingRequest, WebRtcSignalingResponseResult>),
     Kademlia(KademliaEvent),
-    Mdns(MdnsEvent),
+    // Mdns(MdnsEvent),
     Identify(IdentifyEvent),
     Ping(ping::Event),
     RendezvousServer(rendezvous::server::Event),
     RendezvousClient(rendezvous::client::Event),
-    Gossip(gossipsub::GossipsubEvent),
+    // Gossip(gossipsub::GossipsubEvent),
+    Gossip(floodsub::FloodsubEvent),
     Relay(relay::Event),
     Dcutr(dcutr::behaviour::Event),
 }
@@ -934,17 +973,23 @@ impl From<RequestResponseEvent<PaymentInfoRequest, PaymentInfoResponseResult>> f
     }
 }
 
+impl From<RequestResponseEvent<SignalingRequest, WebRtcSignalingResponseResult>> for ComposedEvent {
+    fn from(event: RequestResponseEvent<SignalingRequest, WebRtcSignalingResponseResult>) -> Self {
+        ComposedEvent::WebRtcSignaling(event)
+    }
+}
+
 impl From<KademliaEvent> for ComposedEvent {
     fn from(event: KademliaEvent) -> Self {
         ComposedEvent::Kademlia(event)
     }
 }
 
-impl From<MdnsEvent> for ComposedEvent {
-    fn from(event: MdnsEvent) -> Self {
-        ComposedEvent::Mdns(event)
-    }
-}
+// impl From<MdnsEvent> for ComposedEvent {
+//     fn from(event: MdnsEvent) -> Self {
+//         ComposedEvent::Mdns(event)
+//     }
+// }
 
 impl From<rendezvous::server::Event> for ComposedEvent {
     fn from(event: rendezvous::server::Event) -> Self {
@@ -970,8 +1015,8 @@ impl From<ping::Event> for ComposedEvent {
     }
 }
 
-impl From<gossipsub::GossipsubEvent> for ComposedEvent {
-    fn from(event: gossipsub::GossipsubEvent) -> Self {
+impl From<floodsub::FloodsubEvent> for ComposedEvent {
+    fn from(event: floodsub::FloodsubEvent) -> Self {
         ComposedEvent::Gossip(event)
     }
 }
@@ -1016,6 +1061,12 @@ pub struct NetworkState {
         libp2p::request_response::RequestId,
         oneshot::Sender<anyhow::Result<PaymentInfoResponseResult>>,
     >,
+    pending_webrtc_signaling_request: HashMap<
+        libp2p::request_response::RequestId,
+        oneshot::Sender<
+            Result<WebRtcSignalingResponseResult, libp2p::request_response::OutboundFailure>,
+        >,
+    >,
     published_files_mapping: HashMap<libp2p::kad::record::Key, String>,
     rendezvous_peers: HashMap<PeerId, RendezvousState>,
     peer_statistics: HashMap<PeerId, PeerStatistics>,
@@ -1031,6 +1082,7 @@ pub struct PeerStatistics {
 pub struct ComposedBehaviour {
     pub simple_file_exchange: RequestResponse<simple_file_exchange::SimpleFileExchangeCodec>,
     pub rtmp_streaming: RequestResponse<rtmp_streaming::RTMPStreamingCodec>,
+    pub webrtc_signaling: RequestResponse<webrtc_signaling::WebRtcSignalingCodec>,
     pub payment_info: RequestResponse<payment_info::PaymentInfoCodec>,
     pub kademlia: Kademlia<MemoryStore>,
     // mdns: Mdns,
@@ -1038,13 +1090,18 @@ pub struct ComposedBehaviour {
     pub ping: libp2p::ping::Ping,
     pub rendezvous_server: rendezvous::server::Behaviour,
     pub rendezvous_client: rendezvous::client::Behaviour,
-    pub gossip: gossipsub::Gossipsub,
+    // pub gossip: gossipsub::Gossipsub,
+    pub gossip: floodsub::Floodsub,
     pub relay_server: relay::Relay,
     pub dcutr: dcutr::behaviour::Behaviour,
     #[behaviour(ignore)]
     pub state: NetworkState,
     #[behaviour(ignore)]
     pub event_sender: mpsc::UnboundedSender<InternalNetworkEvent>,
+    #[behaviour(ignore)]
+    pub broadcast_event_sender: broadcast::Sender<BroadcastableNetworkEvent>,
+    #[behaviour(ignore)]
+    pub webrtc_signaling_sender: mpsc::UnboundedSender<webrtc_signaling::RequestEvent>,
 }
 
 #[derive(Clone)]

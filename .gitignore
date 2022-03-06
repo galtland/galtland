@@ -9,3 +9,11 @@ perf.data*
 *.db*
 
 .vscode 
+
+**/*.rs.bk
+bin/
+pkg/
+wasm-pack.log
+node_modules/
+dist/
+*.wasm

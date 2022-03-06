@@ -40,7 +40,7 @@ pub struct GetSimpleFileInfo {
     pub sender: tokio::sync::mpsc::Sender<Result<SimpleFileResponse, String>>,
 }
 
-pub async fn handle_get(
+pub(crate) async fn handle_get(
     mut network: NetworkBackendClient,
     info: GetSimpleFileInfo,
 ) -> anyhow::Result<()> {
@@ -102,7 +102,7 @@ pub async fn handle_get(
     }
 }
 
-pub async fn handle_publish(
+pub(crate) async fn handle_publish(
     mut network: NetworkBackendClient,
     info: PublishSimpleFileInfo,
 ) -> anyhow::Result<()> {
@@ -144,7 +144,7 @@ pub async fn handle_publish(
     Ok(())
 }
 
-pub async fn handle_respond(
+pub(crate) async fn handle_respond(
     shared_state: SharedGlobalState,
     mut network: NetworkBackendClient,
     info: RespondSimpleFileInfo,

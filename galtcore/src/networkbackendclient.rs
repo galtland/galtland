@@ -3,12 +3,10 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
-use libp2p::gossipsub::error::PublishError;
-use libp2p::gossipsub::IdentTopic;
 use libp2p::kad::record::Key;
 use libp2p::request_response::ResponseChannel;
 use libp2p::swarm::NetworkInfo;
-use libp2p::PeerId;
+use libp2p::{floodsub, PeerId};
 use tokio::sync::{mpsc, oneshot};
 
 use super::protocols::kademlia_record::KademliaRecord;
@@ -18,6 +16,7 @@ use crate::protocols::rtmp_streaming::{
     WrappedRTMPStreamingResponseResult,
 };
 use crate::protocols::simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
+use crate::protocols::webrtc_signaling::{SignalingRequest, WebRtcSignalingResponseResult};
 use crate::protocols::PeerStatistics;
 
 #[derive(Debug)]
@@ -59,8 +58,10 @@ pub enum NetworkBackendCommand {
     },
     PublishGossip {
         data: Vec<u8>,
-        topic: IdentTopic,
-        sender: oneshot::Sender<Result<(), PublishError>>,
+        // topic: IdentTopic,
+        topic: floodsub::Topic,
+        // sender: oneshot::Sender<Result<(), PublishError>>,
+        sender: oneshot::Sender<()>,
     },
     RequestSimpleFile {
         file_request: SimpleFileRequest,
@@ -85,6 +86,17 @@ pub enum NetworkBackendCommand {
     RespondPaymentInfo {
         response: PaymentInfoResponseResult,
         channel: ResponseChannel<PaymentInfoResponseResult>,
+    },
+    RespondWebRtcSignaling {
+        response: WebRtcSignalingResponseResult,
+        channel: ResponseChannel<WebRtcSignalingResponseResult>,
+    },
+    RequestWebRtcSignaling {
+        request: SignalingRequest,
+        peer: PeerId,
+        sender: oneshot::Sender<
+            Result<WebRtcSignalingResponseResult, libp2p::request_response::OutboundFailure>,
+        >,
     },
     GetPeerStatistics {
         sender: oneshot::Sender<HashMap<PeerId, PeerStatistics>>,
@@ -219,9 +231,12 @@ impl NetworkBackendClient {
     pub async fn publish_gossip(
         &mut self,
         data: Vec<u8>,
-        topic: IdentTopic,
-    ) -> anyhow::Result<Result<(), PublishError>> {
-        log::debug!("publish_topic {:?} to {}", data, topic.to_string());
+        // topic: IdentTopic,
+        topic: floodsub::Topic,
+    ) -> anyhow::Result<()> {
+        // ) -> anyhow::Result<Result<(), PublishError>> {
+        // log::debug!("publish_topic {:?} to {}", data, topic.to_string());
+        log::debug!("publish_topic {:?} to {:?}", data, topic);
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(NetworkBackendCommand::PublishGossip {
@@ -313,6 +328,42 @@ impl NetworkBackendClient {
         log::debug!("respond_payment_info with success? {}", response.is_ok());
         self.sender
             .send(NetworkBackendCommand::RespondPaymentInfo { response, channel })
+            .await?;
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    pub async fn request_webrtc_signaling(
+        &mut self,
+        request: SignalingRequest,
+        peer: PeerId,
+    ) -> anyhow::Result<
+        Result<WebRtcSignalingResponseResult, libp2p::request_response::OutboundFailure>,
+    > {
+        log::debug!("request_webrtc_signaling to {peer}");
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(NetworkBackendCommand::RequestWebRtcSignaling {
+                request,
+                peer,
+                sender,
+            })
+            .await?;
+        tokio::task::yield_now().await;
+        Ok(receiver.await?)
+    }
+
+    pub async fn respond_webrtc_signaling(
+        &mut self,
+        response: WebRtcSignalingResponseResult,
+        channel: ResponseChannel<WebRtcSignalingResponseResult>,
+    ) -> anyhow::Result<()> {
+        log::debug!(
+            "respond_webrtc_signaling with success? {}",
+            response.is_ok()
+        );
+        self.sender
+            .send(NetworkBackendCommand::RespondWebRtcSignaling { response, channel })
             .await?;
         tokio::task::yield_now().await;
         Ok(())

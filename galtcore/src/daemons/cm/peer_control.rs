@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use itertools::Itertools;
 use libp2p::PeerId;
@@ -8,7 +8,7 @@ use crate::protocols::rtmp_streaming::{RTMPDataSeekType, RTMPStreamingRequest};
 
 
 struct PeerStreamingRequest {
-    time: SystemTime,
+    time: instant::Instant,
     request: RTMPStreamingRequest,
 }
 
@@ -21,9 +21,10 @@ pub enum FloodControlResult {
     Good,
 }
 
+#[derive(Default)]
 pub struct PeerControl {
     last_peer_requests: HashMap<PeerId, VecDeque<PeerStreamingRequest>>,
-    blacklisted: HashMap<PeerId, SystemTime>,
+    blacklisted: HashMap<PeerId, instant::Instant>,
 }
 
 impl PeerControl {
@@ -32,22 +33,19 @@ impl PeerControl {
     const FLOOD_PERIOD_OF_INTEREST: Duration = Duration::from_secs(10);
     const PROVIDE_FOR_PERIOD_OF_INTEREST: Duration = Duration::from_secs(60);
 
-    pub fn new() -> Self {
-        Self {
-            last_peer_requests: HashMap::new(),
-            blacklisted: HashMap::new(),
-        }
+    pub(crate) fn new() -> Self {
+        Self::default()
     }
 
-    fn blacklist(&mut self, peer: &PeerId, now: SystemTime) {
+    fn blacklist(&mut self, peer: &PeerId, now: instant::Instant) {
         self.last_peer_requests.remove(peer);
         self.blacklisted.insert(*peer, now);
     }
 
     // Returns whether peer is still blacklisted
-    fn expire_blacklist(&mut self, peer: &PeerId, now: SystemTime) -> bool {
+    fn expire_blacklist(&mut self, peer: &PeerId, now: instant::Instant) -> bool {
         if let Some(t) = self.blacklisted.get(peer) {
-            if now.duration_since(*t).expect("time to work") > Self::BLACKLIST_DURATION {
+            if now.duration_since(*t) > Self::BLACKLIST_DURATION {
                 return true;
             }
             self.blacklisted.remove(peer);
@@ -55,12 +53,12 @@ impl PeerControl {
         false
     }
 
-    pub fn flood_control(
+    pub(crate) fn flood_control(
         &mut self,
         peer: &PeerId,
         request: RTMPStreamingRequest,
     ) -> FloodControlResult {
-        let now = SystemTime::now();
+        let now = instant::Instant::now();
         if self.expire_blacklist(peer, now) {
             log::debug!("{peer} still in blacklist");
             return FloodControlResult::StillBlacklisted;
@@ -68,9 +66,7 @@ impl PeerControl {
         self.last_peer_requests
             .entry(*peer)
             .or_default()
-            .retain(|p| {
-                now.duration_since(p.time).expect("time to work") <= Self::FLOOD_PERIOD_OF_INTEREST
-            });
+            .retain(|p| now.duration_since(p.time) <= Self::FLOOD_PERIOD_OF_INTEREST);
         let requests = &self.last_peer_requests[peer];
         if !requests.is_empty() {
             {
@@ -107,16 +103,15 @@ impl PeerControl {
         FloodControlResult::Good
     }
 
-    pub fn may_get_from(&mut self, peer: &PeerId) -> bool {
-        let now = SystemTime::now();
+    pub(crate) fn may_get_from(&mut self, peer: &PeerId) -> bool {
+        let now = instant::Instant::now();
         !self.expire_blacklist(peer, now) && {
             let requests = self.last_peer_requests.get(peer);
             match requests {
                 None => true,
-                Some(requests) => !requests.iter().any(|r| {
-                    now.duration_since(r.time).expect("time to work")
-                        < Self::PROVIDE_FOR_PERIOD_OF_INTEREST
-                }),
+                Some(requests) => !requests
+                    .iter()
+                    .any(|r| now.duration_since(r.time) < Self::PROVIDE_FOR_PERIOD_OF_INTEREST),
             }
         }
     }

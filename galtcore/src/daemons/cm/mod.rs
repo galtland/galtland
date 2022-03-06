@@ -8,12 +8,12 @@ pub mod simple_file;
 use std::collections::HashMap;
 use std::ops::Sub;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::Context;
 use libp2p::PeerId;
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use self::peer_control::PeerControl;
 use self::rtmp::handlers::{
@@ -44,7 +44,7 @@ pub enum ClientCommand {
 #[derive(Debug)]
 pub struct SentRTMPResponseStats {
     pub peer: PeerId,
-    pub now: SystemTime,
+    pub now: instant::Instant,
     pub written_bytes: usize,
     pub write_duration: Duration,
     pub responses_count: u32,
@@ -53,7 +53,7 @@ pub struct SentRTMPResponseStats {
 struct SummarizedStats {
     sent_bytes: u128,
     responses: u64,
-    _start_time: SystemTime,
+    _start_time: instant::Instant,
 }
 
 pub struct SentStats {
@@ -94,11 +94,11 @@ impl SentStats {
     }
 
     fn compress(&mut self) {
-        let minimum_time = SystemTime::now().sub(Self::RELEVANT_PERIOD);
+        let minimum_time = instant::Instant::now().sub(Self::RELEVANT_PERIOD);
         self.all_values.retain(|s| s.now >= minimum_time);
     }
 
-    pub fn get_bytes_per_second(&mut self) -> u128 {
+    pub(crate) fn get_bytes_per_second(&mut self) -> u128 {
         self.compress();
         self.all_values
             .iter()
@@ -113,7 +113,8 @@ pub struct SharedGlobalState {
         HashMap<(PeerId, Vec<u8>), ArcMutex<Receiver<Result<SimpleFileResponse, String>>>>,
     >,
     pub active_streams: ArcMutex<HashMap<RtmpStreamingKey, RtmpPublisherClient>>,
-    pub stream_seeker: ArcMutex<HashMap<RtmpStreamingKey, tokio::task::JoinHandle<()>>>,
+    // pub stream_seeker: ArcMutex<HashMap<RtmpStreamingKey, tokio::task::JoinHandle<()>>>,
+    pub stream_seeker: ArcMutex<HashMap<RtmpStreamingKey, oneshot::Sender<()>>>,
     pub peer_control: ArcMutex<PeerControl>,
 }
 

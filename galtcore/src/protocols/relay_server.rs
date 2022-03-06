@@ -7,7 +7,7 @@ use libp2p::Swarm;
 use super::ComposedBehaviour;
 
 
-pub fn handle(event: relay::Event, _swarm: &mut Swarm<ComposedBehaviour>) {
+pub(crate) fn handle(event: relay::Event, _swarm: &mut Swarm<ComposedBehaviour>) {
     match event {
         relay::Event::ReservationReqAccepted {
             src_peer_id,

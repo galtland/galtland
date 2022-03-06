@@ -6,7 +6,7 @@ use libp2p::{dcutr, Swarm};
 use super::ComposedBehaviour;
 
 
-pub fn handle(event: dcutr::behaviour::Event, _swarm: &mut Swarm<ComposedBehaviour>) {
+pub(crate) fn handle(event: dcutr::behaviour::Event, _swarm: &mut Swarm<ComposedBehaviour>) {
     match event {
         dcutr::behaviour::Event::InitiatedDirectConnectionUpgrade {
             remote_peer_id,

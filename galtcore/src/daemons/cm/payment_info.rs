@@ -5,7 +5,7 @@ use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::payment_info::models::PaymentInfo;
 use crate::protocols::payment_info::PaymentInfoResponse;
 
-pub async fn handle_respond(
+pub(crate) async fn handle_respond(
     mut network: NetworkBackendClient,
     info: RespondPaymentInfo,
 ) -> anyhow::Result<()> {

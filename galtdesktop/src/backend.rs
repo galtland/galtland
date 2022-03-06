@@ -6,19 +6,20 @@ use std::time::Duration;
 
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
-use galtcore::daemons::{self, rtmp_server};
+use galtcore::daemons::{self};
 use galtcore::libp2p::futures::StreamExt;
 use galtcore::libp2p::identity::{self, ed25519};
 use galtcore::libp2p::multiaddr::Protocol;
 use galtcore::libp2p::{self, Multiaddr};
-use galtcore::tokio::sync::mpsc;
+use galtcore::tokio::sync::{broadcast, mpsc};
 use galtcore::{networkbackendclient, protocols, tokio, utils};
 use log::{info, warn};
+use nativecommon::rtmp_server;
 
 use crate::Cli;
 
 
-pub async fn start_command(opt: Cli) -> anyhow::Result<()> {
+pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
     let mut db = appcommon::db::Db::get().await?;
     let keypair = match opt.secret_key_seed {
         Some(seed) => {
@@ -57,8 +58,18 @@ pub async fn start_command(opt: Cli) -> anyhow::Result<()> {
 
     // It's unbounded because we can' block the main loop (but of course we can drop events on the receive side)
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
-    let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> =
-        galtcore::swarm::build(configuration.clone(), keypair, event_sender).await;
+    let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
+    let (webrtc_signaling_sender, _webrtc_signaling_receiver) = mpsc::unbounded_channel();
+    let transport = nativecommon::transport::our_transport(&keypair).await?;
+    let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
+        configuration.clone(),
+        keypair,
+        event_sender,
+        broadcast_event_sender,
+        webrtc_signaling_sender,
+        transport,
+    )
+    .await;
 
     let (network_backend_command_sender, mut network_backend_command_receiver) = mpsc::channel(10);
 
@@ -119,6 +130,7 @@ pub async fn start_command(opt: Cli) -> anyhow::Result<()> {
 
     utils::spawn_and_log_error(daemons::internal_network_events::run_loop(
         event_receiver,
+        broadcast_event_receiver,
         highlevel_command_sender,
         gossip_listener_client,
     ));

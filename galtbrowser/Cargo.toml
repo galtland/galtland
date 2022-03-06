@@ -1,0 +1,65 @@
+[package]
+name = "galtbrowser"
+version = "0.1.0"
+authors = ["Data Retriever"]
+edition = "2021"
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+galtcore = { path="../galtcore" }
+
+wasm-bindgen = {version="0.2.63"}
+
+# The `console_error_panic_hook` crate provides better debugging of panics by
+# logging them with `console.error`. This is great for development, but requires
+# all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
+# code size when deploying.
+console_error_panic_hook = { version = "0.1.6", optional = true }
+
+web-sys = {version = "0.3.56", features = [
+    "ErrorEvent",
+    "Event",
+    "MediaDevices",
+    "MediaStream",
+    "MediaStreamEvent",
+    "MediaStreamTrack",
+    "MessageEvent",
+    "Navigator",
+    "ProgressEvent",
+    "RtcConfiguration",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceConnectionState",
+    "RtcIceGatheringState",
+    "RtcOfferOptions",
+    "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
+    "RtcRtpSender",
+    "RtcSdpType",
+    "RtcSessionDescriptionInit",
+    "RtcSignalingState",
+    "RtcTrackEvent",
+    "WebSocket",
+    "Window"
+]}
+
+js-sys = "0.3.56"
+wasm-bindgen-futures = "0.4.29"
+
+libp2p = { version = "0.43", features = [
+    "wasm-bindgen",
+    "wasm-ext",
+    "wasm-ext-websocket",
+    ] }
+anyhow = "1.0.55"
+futures-util = "0.3.21"
+gloo-timers = "=0.2.2"
+byte-unit = "4.0.14"
+console_log = { version = "0.2", features = ["color"] }
+log = "0.4.14"
+yew = "0.19.3"
+wasm-timer = "0.2.5"
+serde = "1.0.136"
+serde_json = "1.0.79"

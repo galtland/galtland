@@ -9,7 +9,7 @@ use crate::video::VideoUnderlay;
 slint::include_modules!();
 
 
-pub fn run_gui(rtmp_listen_address: String) {
+pub(crate) fn run_gui(rtmp_listen_address: String) {
     let app = App::new();
 
     let mut underlay: Option<Rc<RefCell<VideoUnderlay>>> = None;

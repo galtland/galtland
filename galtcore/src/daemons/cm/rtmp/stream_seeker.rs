@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::Context;
 use libp2p::kad::record::Key;
@@ -19,7 +19,7 @@ use crate::protocols::rtmp_streaming::{
 use crate::protocols::NodeIdentity;
 use crate::utils;
 
-pub async fn launch_daemon(
+pub(crate) async fn launch_daemon(
     identity: NodeIdentity,
     streaming_key: RtmpStreamingKey,
     sender: oneshot::Sender<anyhow::Result<RtmpPublisherClient>>,
@@ -36,7 +36,8 @@ pub async fn launch_daemon(
             todo!("not sure what to do here, probably just get daemon sender and send");
         }
         std::collections::hash_map::Entry::Vacant(entry) => {
-            let task = utils::spawn_and_log_error({
+            let (abort_sender, abort_receiver) = oneshot::channel();
+            utils::spawn_and_log_error({
                 let shared_state = shared_state.clone();
                 async move {
                     let r = _stream_seeker_daemon(
@@ -45,6 +46,7 @@ pub async fn launch_daemon(
                         shared_state.clone(),
                         network,
                         sender,
+                        abort_receiver,
                     )
                     .await;
                     shared_state
@@ -55,7 +57,7 @@ pub async fn launch_daemon(
                     r
                 }
             });
-            entry.insert(task);
+            entry.insert(abort_sender);
             tokio::task::yield_now().await;
         }
     };
@@ -68,6 +70,7 @@ async fn _stream_seeker_daemon(
     shared_state: SharedGlobalState,
     mut network: NetworkBackendClient,
     initializer: oneshot::Sender<anyhow::Result<RtmpPublisherClient>>,
+    mut abort_receiver: oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     let streaming_key = &streaming_key;
     log::debug!("Initializing stream seeker daemon for {:?}", streaming_key);
@@ -80,6 +83,10 @@ async fn _stream_seeker_daemon(
     let record;
     {
         loop {
+            if abort_receiver.try_recv().is_ok() {
+                log::info!("Aborted for {streaming_key:?}, exiting...");
+                return Ok(());
+            }
             log::debug!("Trying to get record {:?}", streaming_key);
             match network.get_record(kad_key.clone()).await {
                 Ok(KademliaRecord::Rtmp(r)) => {
@@ -87,11 +94,11 @@ async fn _stream_seeker_daemon(
                     break;
                 }
                 Ok(other) => {
-                    return Err(anyhow::anyhow!(
+                    anyhow::bail!(
                         "Searching for record {:?} returned error wrong record {:?}",
                         &streaming_key,
                         other
-                    ));
+                    );
                 }
                 Err(e) => {
                     log::info!(
@@ -142,6 +149,10 @@ async fn _stream_seeker_daemon(
     let mut empty_data_count = 0;
     let mut consecutive_errors = 0;
     loop {
+        if abort_receiver.try_recv().is_ok() {
+            log::info!("Aborted for {streaming_key:?}, exiting...");
+            return Ok(());
+        }
         let peers = seeker_client.get_peers().await?;
         if peers.is_empty() {
             log::debug!("No peers found for {streaming_key:?}, sleeping a little...");
@@ -273,7 +284,7 @@ async fn _stream_seeker_daemon(
                 .get_last_sent()
                 .await
                 .context("failed to receive")?;
-            if SystemTime::now().duration_since(last_sent).unwrap() > MAX_INACTIVITY_TIME {
+            if instant::Instant::now().duration_since(last_sent) > MAX_INACTIVITY_TIME {
                 log::info!("Exiting {streaming_key:?} because of inactivity");
                 rtmp_publisher_client
                     .die()

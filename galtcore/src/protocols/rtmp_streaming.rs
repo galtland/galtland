@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::time::SystemTime;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -16,13 +15,14 @@ use log::warn;
 
 use super::kademlia_record::RtmpStreamingRecord;
 use super::{ComposedBehaviour, InternalNetworkEvent};
+use crate::daemons::internal_network_events::BroadcastableNetworkEvent;
 use crate::utils;
 
 #[derive(Debug, Clone)]
 pub struct RTMPStreamingProtocol();
 #[derive(Clone)]
 pub struct RTMPStreamingCodec {
-    pub event_sender: tokio::sync::mpsc::UnboundedSender<InternalNetworkEvent>,
+    pub broadcast_event_sender: tokio::sync::broadcast::Sender<BroadcastableNetworkEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -45,7 +45,7 @@ pub enum RTMPDataSeekType {
 }
 
 impl RtmpStreamingKey {
-    pub fn hash_from_parts(app_name: &[u8], stream_key: &PeerId) -> Vec<u8> {
+    pub(crate) fn hash_from_parts(app_name: &[u8], stream_key: &PeerId) -> Vec<u8> {
         blake3::hash(
             [
                 blake3::hash(app_name).as_bytes().as_slice(),
@@ -79,7 +79,7 @@ pub struct RtmpData {
 }
 
 impl RtmpData {
-    pub fn hash(&self, salt: &[u8]) -> blake3::Hash {
+    pub(crate) fn hash(&self, salt: &[u8]) -> blake3::Hash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(salt);
         match self.data_type {
@@ -116,7 +116,7 @@ impl SignedRtmpData {
         })
     }
 
-    pub fn verify(&self, record: &RtmpStreamingRecord) -> bool {
+    pub(crate) fn verify(&self, record: &RtmpStreamingRecord) -> bool {
         let hash = self.rtmp_data.hash(record.key.as_ref());
         record.public_key.verify(hash.as_bytes(), &self.signature)
     }
@@ -185,6 +185,7 @@ impl ProtocolName for RTMPStreamingProtocol {
         "/rtmp-streaming/1".as_bytes()
     }
 }
+const MAX_SIZE: usize = 10_000_000;
 
 #[async_trait]
 impl RequestResponseCodec for RTMPStreamingCodec {
@@ -337,8 +338,10 @@ impl RequestResponseCodec for RTMPStreamingCodec {
         };
         utils::write_varint(io, timestamp_reference as usize).await?;
         utils::write_varint(io, sequence_id as usize).await?;
-        utils::write_length_prefixed(io, r.streaming_key.app_name.as_bytes()).await?;
-        utils::write_length_prefixed(io, r.streaming_key.stream_key.to_bytes()).await?;
+        utils::write_limited_length_prefixed(io, r.streaming_key.app_name.as_bytes(), MAX_SIZE)
+            .await?;
+        utils::write_limited_length_prefixed(io, r.streaming_key.stream_key.to_bytes(), MAX_SIZE)
+            .await?;
         Ok(())
     }
 
@@ -353,11 +356,11 @@ impl RequestResponseCodec for RTMPStreamingCodec {
     {
         let mut written_bytes = 0;
         let mut responses_count: u32 = 0;
-        let start = SystemTime::now();
+        let start = instant::Instant::now();
         let result = match r.response {
             Err(s) => {
                 written_bytes += utils::write_varint(io, 0).await?;
-                written_bytes += utils::write_length_prefixed(io, s).await?;
+                written_bytes += utils::write_limited_length_prefixed(io, s, MAX_SIZE).await?;
                 responses_count += 1;
                 Ok(())
             }
@@ -383,7 +386,9 @@ impl RequestResponseCodec for RTMPStreamingCodec {
                         RtmpDataType::Video => 1,
                     }; // TODO: optimize and pack these flags in fewer bits
                     written_bytes += utils::write_varint(io, flags).await?;
-                    written_bytes += utils::write_length_prefixed(io, r.rtmp_data.data).await?;
+                    written_bytes +=
+                        utils::write_limited_length_prefixed(io, r.rtmp_data.data, MAX_SIZE)
+                            .await?;
                     written_bytes +=
                         utils::write_varint(io, r.rtmp_data.rtmp_timestamp as usize).await?;
                     written_bytes += utils::write_varint(
@@ -395,7 +400,8 @@ impl RequestResponseCodec for RTMPStreamingCodec {
                         utils::write_varint(io, r.rtmp_data.source_offset.sequence_id as usize)
                             .await?;
 
-                    written_bytes += utils::write_length_prefixed(io, r.signature).await?;
+                    written_bytes +=
+                        utils::write_limited_length_prefixed(io, r.signature, MAX_SIZE).await?;
                     responses_count += 1;
                 }
                 Ok(())
@@ -412,8 +418,8 @@ impl RequestResponseCodec for RTMPStreamingCodec {
             }
         };
         io.flush().await?;
-        let finish = SystemTime::now();
-        let write_duration = finish.duration_since(start).expect("time to work");
+        let finish = instant::Instant::now();
+        let write_duration = finish.duration_since(start);
         let micros = write_duration.as_micros();
         let rate_kb = if micros > 0 {
             1000.0 * written_bytes as f64 / micros as f64
@@ -428,15 +434,15 @@ impl RequestResponseCodec for RTMPStreamingCodec {
         log::debug!(
             "SentRTMPResponseBytes written_bytes {written_bytes} responses_count {responses_count} ({avg_response_size}B/message) write_duration {write_duration:?} {rate_kb:.2}kB/s"
         );
-        if let Err(e) = self
-            .event_sender
-            .send(InternalNetworkEvent::SentRTMPResponseStats {
-                peer: r.peer.expect("code to not be bugged"),
-                now: finish,
-                written_bytes,
-                write_duration,
-                responses_count,
-            })
+        if let Err(e) =
+            self.broadcast_event_sender
+                .send(BroadcastableNetworkEvent::SentRTMPResponseStats {
+                    peer: r.peer.expect("code to not be bugged"),
+                    now: finish,
+                    written_bytes,
+                    write_duration,
+                    responses_count,
+                })
         {
             log::warn!("Error sending SentRTMPResponseBytes: {}", e);
         }
@@ -444,7 +450,7 @@ impl RequestResponseCodec for RTMPStreamingCodec {
     }
 }
 
-pub fn handle_event(
+pub(crate) fn handle_event(
     event: RequestResponseEvent<RTMPStreamingRequest, WrappedRTMPStreamingResponseResult>,
     swarm: &mut Swarm<ComposedBehaviour>,
 ) {

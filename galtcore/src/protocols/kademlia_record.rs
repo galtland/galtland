@@ -71,13 +71,13 @@ impl RtmpStreamingRecord {
         Ok(record)
     }
 
-    pub fn rtmp_streaming_kad_key(app_name: &str, stream_key: &PeerId) -> Vec<u8> {
+    pub(crate) fn rtmp_streaming_kad_key(app_name: &str, stream_key: &PeerId) -> Vec<u8> {
         let hash = RtmpStreamingKey::hash_from_parts(app_name.as_bytes(), stream_key);
         assert!(hash.len() == RTMP_FILE_HASH_SIZE);
         [RTMP_PREFIX, &hash].concat()
     }
 
-    pub fn generate_rtmp_record_signature_data(
+    pub(crate) fn generate_rtmp_record_signature_data(
         kad_key: &[u8],
         updated_at: &DateTime<Utc>,
     ) -> Vec<u8> {
@@ -86,14 +86,14 @@ impl RtmpStreamingRecord {
 }
 
 impl KademliaRecord {
-    pub fn new_simple_file_record(bytes: &[u8]) -> Self {
+    pub(crate) fn new_simple_file_record(bytes: &[u8]) -> Self {
         Self::SimpleFileRecord {
             key: Key::new(&bytes),
             hash: Bytes::copy_from_slice(bytes),
         }
     }
 
-    pub fn into_record(self) -> anyhow::Result<Record> {
+    pub(crate) fn into_record(self) -> anyhow::Result<Record> {
         match self {
             KademliaRecord::SimpleFileRecord { key, hash } => {
                 let value = bincode::serialize(&SerializableKademliaRecord::SimpleFileRecord {
@@ -134,7 +134,7 @@ impl KademliaRecord {
         }
     }
 
-    pub fn key(&self) -> &Key {
+    pub(crate) fn key(&self) -> &Key {
         match self {
             Self::Rtmp(RtmpStreamingRecord { key, .. }) => key,
             Self::SimpleFileRecord { key, .. } => key,

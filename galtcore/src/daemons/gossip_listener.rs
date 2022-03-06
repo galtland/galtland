@@ -1,27 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use libp2p::gossipsub::GossipsubMessage;
+// use libp2p::gossipsub::GossipsubMessage;
+use libp2p::floodsub::FloodsubMessage;
 use libp2p::kad::record::Key;
 
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::kademlia_record::{KademliaRecord, RtmpStreamingRecord};
 use crate::utils::{self, ArcMutex};
 
+type SubMessage = FloodsubMessage;
 pub enum GossipedRtmpRecord {
     Found {
-        time: SystemTime,
+        time: instant::Instant,
         record: RtmpStreamingRecord,
     },
-    Searching(SystemTime),
-    Missing(SystemTime),
+    Searching(instant::Instant),
+    Missing(instant::Instant),
 }
 
 #[derive(Default)]
 struct State {
-    recent_messages: VecDeque<GossipsubMessage>,
+    recent_messages: VecDeque<SubMessage>,
     found_rtmp_records: HashMap<libp2p::kad::record::Key, GossipedRtmpRecord>,
 }
 
@@ -41,8 +43,12 @@ impl GossipListenerClient {
         }
     }
 
-    pub async fn whisper(&self, message: GossipsubMessage) {
-        if message.topic == crate::protocols::gossip::rtmp_keys_gossip().hash() {
+    pub(crate) async fn whisper(&self, message: SubMessage) {
+        // if message.topic == crate::protocols::gossip::rtmp_keys_gossip().hash() {
+        if message
+            .topics
+            .contains(&crate::protocols::gossip::rtmp_keys_gossip())
+        {
             let key: Key = message.data.to_vec().into();
             self.notify_rtmp_key(key).await;
         }
@@ -51,8 +57,8 @@ impl GossipListenerClient {
         state.recent_messages.truncate(Self::MAX_RECENT_MESSAGES);
     }
 
-    pub async fn notify_rtmp_key(&self, key: Key) {
-        let time = SystemTime::now();
+    pub(crate) async fn notify_rtmp_key(&self, key: Key) {
+        let time = instant::Instant::now();
         self.state
             .lock()
             .await
@@ -98,8 +104,8 @@ impl GossipListenerClient {
         });
     }
 
-    pub async fn notify_rtmp_record(&self, record: RtmpStreamingRecord) {
-        let time = SystemTime::now();
+    pub(crate) async fn notify_rtmp_record(&self, record: RtmpStreamingRecord) {
+        let time = instant::Instant::now();
         self.state.lock().await.found_rtmp_records.insert(
             record.key.clone(),
             GossipedRtmpRecord::Found { time, record },

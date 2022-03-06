@@ -2,7 +2,6 @@
 
 use std::io;
 use std::str::Utf8Error;
-use std::time::SystemTime;
 
 use bytes::BytesMut;
 use tokio::fs::File;
@@ -10,7 +9,7 @@ use tokio::io::{AsyncReadExt, BufReader};
 
 pub type ArcMutex<T> = std::sync::Arc<tokio::sync::Mutex<T>>;
 
-pub(crate) fn to_simple_error<T, E: std::fmt::Debug>(e: E) -> anyhow::Result<T> {
+pub fn to_simple_error<T, E: std::fmt::Debug>(e: E) -> anyhow::Result<T> {
     Err(anyhow::anyhow!("{:?}", e))
 }
 
@@ -27,22 +26,58 @@ pub async fn blake3_file_hash(filename: &str) -> Result<Vec<u8>, io::Error> {
     Ok(hash.as_bytes().to_vec())
 }
 
-pub fn spawn_and_log_error<F>(fut: F) -> tokio::task::JoinHandle<()>
+#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+pub fn spawn<F, O: Send + 'static>(fut: F)
+where
+    F: std::future::Future<Output = O> + Send + 'static,
+{
+    tokio::spawn(fut);
+}
+
+#[cfg(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown"))]
+pub fn spawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wspawn(fut);
+}
+
+pub fn wspawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(fut);
+}
+
+pub fn spawn_and_log_error<F>(fut: F)
 where
     F: std::future::Future<Output = Result<(), anyhow::Error>> + Send + 'static,
 {
-    tokio::spawn(async move {
+    spawn(async move {
         if let Err(e) = fut.await {
             log::error!("Spawn future error: {}\n{}", e, e.backtrace())
         }
     })
 }
 
+// No 'send' requirements
+pub fn wspawn_and_log_error<F>(fut: F)
+where
+    F: std::future::Future<Output = Result<(), anyhow::Error>> + 'static,
+{
+    wspawn(async move {
+        if let Err(e) = fut.await {
+            log::error!("Spawn future error: {}\n{}", e, e.backtrace())
+        }
+    })
+}
+
+
 pub fn utf8_error(e: Utf8Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
 }
 
-pub async fn write_length_prefixed(
+async fn write_length_prefixed(
     socket: &mut (impl libp2p::futures::AsyncWrite + Unpin),
     data: impl AsRef<[u8]>,
 ) -> Result<usize, io::Error> {
@@ -57,6 +92,23 @@ pub async fn write_length_prefixed(
     written_bytes += data_len;
 
     Ok(written_bytes)
+}
+
+pub async fn write_limited_length_prefixed(
+    socket: &mut (impl libp2p::futures::AsyncWrite + Unpin),
+    data: impl AsRef<[u8]>,
+    max_size: usize,
+) -> Result<usize, io::Error> {
+    let data = data.as_ref();
+    let len = data.len();
+    if len >= max_size {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Error serializing response: {len} bytes is too much"),
+        ))
+    } else {
+        write_length_prefixed(socket, data).await
+    }
 }
 
 pub async fn write_varint(
@@ -74,13 +126,9 @@ pub async fn write_varint(
 
 #[allow(dead_code)]
 pub fn measure<F: FnOnce() -> R, R>(prefix: &str, block: F) -> R {
-    let now = SystemTime::now();
+    let now = instant::Instant::now();
     let r = block();
-    log::debug!(
-        "{} took: {:?}",
-        prefix,
-        now.elapsed().expect("time to work")
-    );
+    log::debug!("{} took: {:?}", prefix, now.elapsed());
     r
 }
 

@@ -29,7 +29,7 @@ pub struct VideoUnderlay {
 }
 
 impl VideoUnderlay {
-    pub fn new(gl: glow::Context, proc_addr_ctx: *mut c_void, wh: (f32, f32)) -> Self {
+    pub(crate) fn new(gl: glow::Context, proc_addr_ctx: *mut c_void, wh: (f32, f32)) -> Self {
         let mut mpv = Mpv::new().expect("Error while creating MPV");
         let render_ctx = RenderContext::new(
             unsafe { mpv.ctx.as_mut() },
@@ -49,7 +49,7 @@ impl VideoUnderlay {
         Self::init_gl(gl, wh, mpv, render_ctx)
     }
 
-    pub fn replace_play(&self, video: String) {
+    pub(crate) fn replace_play(&self, video: String) {
         self.mpv
             .playlist_load_files(&[(&video, FileState::Replace, None)])
             .expect("to append");
@@ -194,23 +194,23 @@ impl VideoUnderlay {
         }
     }
 
-    pub fn pause(&self) {
+    pub(crate) fn pause(&self) {
         self.mpv.pause().expect("to pause");
     }
 
-    pub fn play(&self) {
+    pub(crate) fn play(&self) {
         self.mpv.unpause().expect("to play");
     }
 
-    pub fn get_position(&self) -> Option<i64> {
+    pub(crate) fn get_position(&self) -> Option<i64> {
         self.mpv.get_property::<i64>("time-pos").ok()
     }
 
-    pub fn get_duration(&self) -> Option<i64> {
+    pub(crate) fn get_duration(&self) -> Option<i64> {
         self.mpv.get_property::<i64>("duration").ok()
     }
 
-    pub fn get_ts_label(&self) -> String {
+    pub(crate) fn get_ts_label(&self) -> String {
         fn secs_to_pretty(secs: i64) -> String {
             let seconds = secs % 60;
             let minutes = (secs / 60) % 60;
@@ -229,11 +229,11 @@ impl VideoUnderlay {
         )
     }
 
-    pub fn get_mpv(&mut self) -> &mut Mpv {
+    pub(crate) fn get_mpv(&mut self) -> &mut Mpv {
         &mut self.mpv
     }
 
-    pub fn render(&mut self, (width, height): (f32, f32)) {
+    pub(crate) fn render(&mut self, (width, height): (f32, f32)) {
         unsafe {
             let gl = &self.gl;
 

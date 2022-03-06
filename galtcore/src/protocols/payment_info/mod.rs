@@ -32,7 +32,7 @@ impl ProtocolName for PaymentInfoProtocol {
     }
 }
 
-const MAX_SERIALIZED_SIZE: usize = 1_000_000;
+const MAX_SIZE: usize = 1_000_000;
 
 #[async_trait]
 impl RequestResponseCodec for PaymentInfoCodec {
@@ -67,7 +67,7 @@ impl RequestResponseCodec for PaymentInfoCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let data = read_length_prefixed(io, MAX_SERIALIZED_SIZE).await?;
+        let data = read_length_prefixed(io, MAX_SIZE).await?;
         match bincode::deserialize(&data) {
             Ok(r) => Ok(r),
             Err(e) => {
@@ -103,16 +103,8 @@ impl RequestResponseCodec for PaymentInfoCodec {
     {
         match bincode::serialize(&r) {
             Ok(r) => {
-                let len = r.len();
-                if len >= MAX_SERIALIZED_SIZE {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Error serializing response: {len} bytes is too much"),
-                    ))
-                } else {
-                    utils::write_length_prefixed(io, r).await?;
-                    Ok(())
-                }
+                utils::write_limited_length_prefixed(io, r, MAX_SIZE).await?;
+                Ok(())
             }
             Err(e) => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
