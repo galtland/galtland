@@ -14,7 +14,6 @@ use galtcore::libp2p::{self, Multiaddr};
 use galtcore::tokio::sync::{broadcast, mpsc};
 use galtcore::{networkbackendclient, protocols, tokio, utils};
 use log::{info, warn};
-use nativecommon::rtmp_server;
 
 use crate::Cli;
 
@@ -60,6 +59,7 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, _webrtc_signaling_receiver) = mpsc::unbounded_channel();
+    let (delegated_streaming_sender, _delegated_streaming_receiver) = mpsc::unbounded_channel();
     let transport = nativecommon::transport::our_transport(&keypair).await?;
     let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
         configuration.clone(),
@@ -67,6 +67,7 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
         event_sender,
         broadcast_event_sender,
         webrtc_signaling_sender,
+        delegated_streaming_sender,
         transport,
     )
     .await;
@@ -99,11 +100,11 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
         }
     }
 
-    utils::spawn_and_log_error(rtmp_server::accept_loop(
-        opt.rtmp_listen_address,
-        identity.clone(),
-        highlevel_command_sender.clone(),
-    ));
+    // utils::spawn_and_log_error(rtmp_server::accept_loop(
+    //     opt.rtmp_listen_address,
+    //     identity.clone(),
+    //     highlevel_command_sender.clone(),
+    // ));
 
     for address in rendezvous_addresses {
         match swarm.dial(address.clone()) {

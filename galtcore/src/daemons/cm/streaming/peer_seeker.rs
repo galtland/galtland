@@ -11,9 +11,9 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::daemons::cm::SharedGlobalState;
 use crate::networkbackendclient::NetworkBackendClient;
-use crate::protocols::kademlia_record::RtmpStreamingRecord;
-use crate::protocols::rtmp_streaming::{
-    RTMPDataSeekType, RTMPStreamingRequest, RtmpStreamingKey, RtmpStreamingResponse, StreamOffset,
+use crate::protocols::kademlia_record::StreamingRecord;
+use crate::protocols::media_streaming::{
+    StreamOffset, StreamSeekType, StreamingKey, StreamingRequest, StreamingResponse,
 };
 use crate::protocols::{NodeIdentity, PeerStatistics};
 use crate::utils::{self, spawn_and_log_error, ArcMutex};
@@ -22,7 +22,7 @@ pub(crate) fn launch_daemon(
     identity: NodeIdentity,
     shared_global_state: SharedGlobalState,
     network: NetworkBackendClient,
-    streaming_key: RtmpStreamingKey,
+    streaming_key: StreamingKey,
     // ) -> (tokio::task::JoinHandle<()>, PeerSeekerClient) {
 ) -> ((), PeerSeekerClient) {
     // TODO: perhaps receive internal network events
@@ -46,7 +46,7 @@ impl PeerSeekerClient {
             .await
             .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
-        Ok(receiver.await.map_err(utils::send_error)?)
+        receiver.await.map_err(utils::send_error)
     }
 
     async fn temporarily_ban(
@@ -143,7 +143,7 @@ struct PeerSeeker {
     identity: NodeIdentity,
     shared_global_state: SharedGlobalState,
     network: NetworkBackendClient,
-    streaming_key: RtmpStreamingKey,
+    streaming_key: StreamingKey,
     kad_key: Vec<u8>,
     peer_shared_state: ArcMutex<PeersSharedState>,
 }
@@ -159,11 +159,11 @@ impl PeerSeeker {
         identity: NodeIdentity,
         shared_global_state: SharedGlobalState,
         network: NetworkBackendClient,
-        streaming_key: RtmpStreamingKey,
+        streaming_key: StreamingKey,
     ) -> Self {
-        let kad_key = RtmpStreamingRecord::rtmp_streaming_kad_key(
-            &streaming_key.app_name,
-            &streaming_key.stream_key,
+        let kad_key = StreamingRecord::streaming_kad_key(
+            &streaming_key.video_key,
+            &streaming_key.channel_key,
         );
         Self {
             identity,
@@ -263,7 +263,7 @@ impl PeerSeeker {
 
     fn peer_maintenance(&mut self) -> anyhow::Result<()> {
         spawn_and_log_error({
-            let mut network = self.network.clone();
+            let network = self.network.clone();
             let our_peer_id = self.identity.peer_id;
             {
                 let peer_shared_state = self.peer_shared_state.clone();
@@ -290,7 +290,7 @@ impl PeerSeeker {
             let shared_global_state = self.shared_global_state.clone();
             async move {
                 match network.get_providers(kad_key).await {
-                    Ok(mut peers) => {
+                    Ok(Ok(mut peers)) => {
                         peers.remove(&our_peer_id);
                         log::debug!(
                             "peer_maintenance get_providers got {} peers for {streaming_key:?}",
@@ -371,6 +371,7 @@ impl PeerSeeker {
                             };
                         }
                     }
+                    Ok(Err(_)) => todo!(),
                     Err(_) => todo!(),
                 };
                 Ok(())
@@ -381,8 +382,8 @@ impl PeerSeeker {
 
     async fn update_peer(
         shared_global_state: SharedGlobalState,
-        mut network: NetworkBackendClient,
-        streaming_key: RtmpStreamingKey,
+        network: NetworkBackendClient,
+        streaming_key: StreamingKey,
         peer: PeerId,
     ) -> anyhow::Result<PeerState> {
         let result = if shared_global_state
@@ -392,50 +393,68 @@ impl PeerSeeker {
             .may_get_from(&peer)
         {
             match network
-                .request_rtmp_streaming_data(
-                    RTMPStreamingRequest {
+                .request_streaming_data(
+                    StreamingRequest {
                         streaming_key,
-                        seek_type: RTMPDataSeekType::Peek,
+                        seek_type: StreamSeekType::Peek,
                     },
                     peer,
                 )
                 .await?
             {
-                Ok(Ok(RtmpStreamingResponse::Data(responses))) => {
-                    match responses.first() {
-                        Some(r) => {
-                            let offset = r.rtmp_data.source_offset;
-                            log::debug!(
-                                "Got RTMPStreamingResponse::Data peek with {offset:?} from {peer}"
-                            );
-                            PeerState::Active(offset)
-                        }
-                        None => {
-                            log::debug!("Got RTMPStreamingResponse::Data peek with empty response from {peer}");
-                            PeerState::Empty
-                        }
+                Ok(Ok(StreamingResponse::Data(responses))) => match responses.first() {
+                    Some(r) => {
+                        let offset = r.streaming_data.source_offset;
+                        log::debug!("Got StreamingResponse::Data peek with {offset:?} from {peer}");
+                        PeerState::Active(offset)
                     }
-                }
-                Ok(Ok(RtmpStreamingResponse::MaxUploadRateReached)) => {
-                    log::info!("Got RTMPStreamingResponse::MaxUploadRateReached for peer {peer}, temporarily blacklisting...");
+                    None => {
+                        log::debug!(
+                            "Got StreamingResponse::Data peek with empty response from {peer}"
+                        );
+                        PeerState::Empty
+                    }
+                },
+                Ok(Ok(StreamingResponse::MaxUploadRateReached)) => {
+                    log::info!("Got StreamingResponse::MaxUploadRateReached for peer {peer}, temporarily blacklisting...");
                     PeerState::TemporarilyBlacklisted(
                         instant::Instant::now() + Self::BLACKLIST_DURATION_ON_MAX_UPLOAD,
                     )
                 }
-                Ok(Ok(RtmpStreamingResponse::TooMuchFlood)) => {
-                    log::warn!("Got RTMPStreamingResponse::TooMuchFlood for peer {peer}, temporarily blacklisting...");
+                Ok(Ok(StreamingResponse::TooMuchFlood)) => {
+                    log::warn!("Got StreamingResponse::TooMuchFlood for peer {peer}, temporarily blacklisting...");
                     PeerState::TemporarilyBlacklisted(
                         instant::Instant::now() + Self::BLACKLIST_DURATION_ON_FLOOD,
                     )
                 }
                 Ok(Err(e)) => {
-                    log::warn!("Got error {e} for peer {peer}, temporarily blacklisting...");
+                    log::warn!("Got string error {e} for peer {peer}, temporarily blacklisting...");
                     PeerState::TemporarilyBlacklisted(
                         instant::Instant::now() + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
                     )
                 }
-                Err(e) => {
-                    log::warn!("Got error {e} for peer {peer}, temporarily blacklisting...");
+                Err(libp2p::request_response::OutboundFailure::UnsupportedProtocols) => {
+                    log::warn!(
+                        "Got OutboundFailure::UnsupportedProtocols for peer {peer}, banning..."
+                    );
+                    PeerState::Blacklisted
+                }
+                Err(libp2p::request_response::OutboundFailure::DialFailure) => {
+                    log::warn!(
+                        "Got OutboundFailure::UnsupportedProtocols for peer {peer}, banning..."
+                    );
+                    PeerState::Blacklisted
+                }
+                Err(libp2p::request_response::OutboundFailure::ConnectionClosed) => {
+                    log::warn!("Got OutboundFailure::ConnectionClosed for peer {peer}, temporarily blacklisting...");
+                    PeerState::TemporarilyBlacklisted(
+                        instant::Instant::now() + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
+                    )
+                }
+                Err(libp2p::request_response::OutboundFailure::Timeout) => {
+                    log::warn!(
+                        "Got OutboundFailure::Timeout for peer {peer}, temporarily blacklisting..."
+                    );
                     PeerState::TemporarilyBlacklisted(
                         instant::Instant::now() + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
                     )

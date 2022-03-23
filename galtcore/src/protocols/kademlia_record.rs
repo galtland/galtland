@@ -8,13 +8,13 @@ use libp2p::kad::Record;
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
-use super::rtmp_streaming::RtmpStreamingKey;
+use super::media_streaming::StreamingKey;
 
 const SIMPLE_FILE_HASH_SIZE: usize = 32;
-const RTMP_FILE_HASH_SIZE: usize = 32;
+const STREAM_FILE_HASH_SIZE: usize = 32;
 
-const RTMP_PREFIX: &[u8] = b"rtmp_";
-const RTMP_KEY_SIZE: usize = RTMP_PREFIX.len() + RTMP_FILE_HASH_SIZE;
+const STREAM_PREFIX: &[u8] = b"STREAM_";
+const STREAM_KEY_SIZE: usize = STREAM_PREFIX.len() + STREAM_FILE_HASH_SIZE;
 
 #[derive(Serialize, Deserialize)]
 pub enum SerializableKademliaRecord {
@@ -22,11 +22,11 @@ pub enum SerializableKademliaRecord {
         key: Vec<u8>,
         hash: Vec<u8>,
     },
-    RtmpStreamingRecord {
+    StreamingRecord {
         key: Vec<u8>,
         public_key: Vec<u8>,
-        app_name: String,
-        stream_key: Vec<u8>,
+        video_key: Vec<u8>,
+        channel_key: Vec<u8>,
         updated_at_timestamp_seconds: i64,
         signature: Vec<u8>,
     },
@@ -36,30 +36,29 @@ pub enum SerializableKademliaRecord {
 #[derive(Debug, Clone)]
 pub enum KademliaRecord {
     SimpleFileRecord { key: Key, hash: Bytes },
-    Rtmp(RtmpStreamingRecord),
+    MediaStreaming(StreamingRecord),
 }
 
 #[derive(Debug, Clone)]
-pub struct RtmpStreamingRecord {
+pub struct StreamingRecord {
     pub key: Key,
     pub public_key: PublicKey,
-    pub streaming_key: RtmpStreamingKey,
+    pub streaming_key: StreamingKey,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub signature: Bytes,
 }
 
-impl RtmpStreamingRecord {
+impl StreamingRecord {
     pub fn new(
         keypair: &libp2p::core::identity::Keypair,
-        streaming_key: &RtmpStreamingKey,
+        streaming_key: &StreamingKey,
         updated_at: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<Self> {
-        if streaming_key.app_name.is_empty() {
-            anyhow::bail!("Empty app name");
+        if streaming_key.video_key.is_empty() {
+            anyhow::bail!("Empty video key");
         }
-        let kad_key =
-            Self::rtmp_streaming_kad_key(&streaming_key.app_name, &streaming_key.stream_key);
-        let signature_data = Self::generate_rtmp_record_signature_data(&kad_key, &updated_at);
+        let kad_key = Self::streaming_kad_key(&streaming_key.video_key, &streaming_key.channel_key);
+        let signature_data = Self::generate_record_signature_data(&kad_key, &updated_at);
         let signature = keypair.sign(&signature_data)?;
         let record = Self {
             key: kad_key.into(),
@@ -71,13 +70,13 @@ impl RtmpStreamingRecord {
         Ok(record)
     }
 
-    pub(crate) fn rtmp_streaming_kad_key(app_name: &str, stream_key: &PeerId) -> Vec<u8> {
-        let hash = RtmpStreamingKey::hash_from_parts(app_name.as_bytes(), stream_key);
-        assert!(hash.len() == RTMP_FILE_HASH_SIZE);
-        [RTMP_PREFIX, &hash].concat()
+    pub(crate) fn streaming_kad_key(app_name: &[u8], stream_key: &PeerId) -> Vec<u8> {
+        let hash = StreamingKey::hash_from_parts(app_name, stream_key);
+        assert!(hash.len() == STREAM_FILE_HASH_SIZE);
+        [STREAM_PREFIX, &hash].concat()
     }
 
-    pub(crate) fn generate_rtmp_record_signature_data(
+    pub(crate) fn generate_record_signature_data(
         kad_key: &[u8],
         updated_at: &DateTime<Utc>,
     ) -> Vec<u8> {
@@ -108,18 +107,18 @@ impl KademliaRecord {
                 };
                 Ok(record)
             }
-            KademliaRecord::Rtmp(RtmpStreamingRecord {
+            KademliaRecord::MediaStreaming(StreamingRecord {
                 key,
                 public_key,
                 streaming_key,
                 updated_at,
                 signature,
             }) => {
-                let value = bincode::serialize(&SerializableKademliaRecord::RtmpStreamingRecord {
+                let value = bincode::serialize(&SerializableKademliaRecord::StreamingRecord {
                     key: key.to_vec(),
                     public_key: public_key.to_protobuf_encoding(),
-                    app_name: streaming_key.app_name,
-                    stream_key: streaming_key.stream_key.to_bytes(),
+                    video_key: streaming_key.video_key,
+                    channel_key: streaming_key.channel_key.to_bytes(),
                     updated_at_timestamp_seconds: updated_at.timestamp(),
                     signature: signature.to_vec(),
                 })?;
@@ -136,7 +135,7 @@ impl KademliaRecord {
 
     pub(crate) fn key(&self) -> &Key {
         match self {
-            Self::Rtmp(RtmpStreamingRecord { key, .. }) => key,
+            Self::MediaStreaming(StreamingRecord { key, .. }) => key,
             Self::SimpleFileRecord { key, .. } => key,
         }
     }
@@ -167,16 +166,16 @@ impl TryFrom<&Record> for KademliaRecord {
                     })
                 }
             }
-            SerializableKademliaRecord::RtmpStreamingRecord {
+            SerializableKademliaRecord::StreamingRecord {
                 key,
                 public_key,
-                app_name,
-                stream_key,
+                video_key: app_name,
+                channel_key: stream_key,
                 updated_at_timestamp_seconds,
                 signature,
             } => {
-                if key.len() != RTMP_KEY_SIZE {
-                    anyhow::bail!("Key length is {} instead of {}", key.len(), RTMP_KEY_SIZE);
+                if key.len() != STREAM_KEY_SIZE {
+                    anyhow::bail!("Key length is {} instead of {}", key.len(), STREAM_KEY_SIZE);
                 }
                 let public_key = libp2p::core::PublicKey::from_protobuf_encoding(&public_key)?;
                 let peer_id = public_key.to_peer_id();
@@ -189,25 +188,22 @@ impl TryFrom<&Record> for KademliaRecord {
                 if peer_id != stream_key {
                     anyhow::bail!("peer id {} should match stream key {}", peer_id, stream_key,);
                 }
-                let calculated_key =
-                    RtmpStreamingRecord::rtmp_streaming_kad_key(&app_name, &stream_key);
+                let calculated_key = StreamingRecord::streaming_kad_key(&app_name, &stream_key);
                 if calculated_key != key {
                     anyhow::bail!("Invalid key");
                 }
 
                 let updated_at = Utc.timestamp(updated_at_timestamp_seconds, 0);
-                let signature_data = RtmpStreamingRecord::generate_rtmp_record_signature_data(
-                    &calculated_key,
-                    &updated_at,
-                );
+                let signature_data =
+                    StreamingRecord::generate_record_signature_data(&calculated_key, &updated_at);
                 if !public_key.verify(&signature_data, &signature) {
                     anyhow::bail!("Invalid signature");
                 }
-                let streaming_key = RtmpStreamingKey {
-                    app_name,
-                    stream_key,
+                let streaming_key = StreamingKey {
+                    video_key: app_name,
+                    channel_key: stream_key,
                 };
-                Ok(Self::Rtmp(RtmpStreamingRecord {
+                Ok(Self::MediaStreaming(StreamingRecord {
                     key: record.key.clone(),
                     public_key,
                     streaming_key,

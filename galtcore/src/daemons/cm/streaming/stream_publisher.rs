@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use anyhow::Context;
 use itertools::Itertools;
 // use libp2p::gossipsub::error::PublishError;
 use libp2p::PeerId;
@@ -12,25 +13,25 @@ use tokio::sync::oneshot;
 
 use crate::daemons::cm::SharedGlobalState;
 use crate::networkbackendclient::NetworkBackendClient;
-use crate::protocols::kademlia_record::{KademliaRecord, RtmpStreamingRecord};
-use crate::protocols::rtmp_streaming::{
-    self, RTMPDataSeekType, RTMPFrameType, RTMPStreamingResponseResult, RtmpStreamingKey,
-    RtmpStreamingResponse, SignedRtmpData,
+use crate::protocols::kademlia_record::{KademliaRecord, StreamingRecord};
+use crate::protocols::media_streaming::{
+    self, RTMPFrameType, SignedStreamingData, StreamSeekType, StreamingDataType, StreamingKey,
+    StreamingResponse, StreamingResponseResult,
 };
 use crate::{protocols, utils};
 
-type SenderRtmpData = mpsc::Sender<RTMPDataClientCommand>;
+type SenderStreamingData = mpsc::Sender<StreamingDataClientCommand>;
 
 #[derive(Debug)]
-enum RTMPDataClientCommand {
-    NewRTMPData {
-        rtmp_data: Vec<SignedRtmpData>,
+enum StreamingDataClientCommand {
+    NewStreamingData {
+        data: Vec<SignedStreamingData>,
         sender: oneshot::Sender<anyhow::Result<()>>,
     },
-    GetRTMPData {
+    GetStreamingData {
         peer: PeerId,
-        seek_type: RTMPDataSeekType,
-        sender: oneshot::Sender<RTMPStreamingResponseResult>,
+        seek_type: StreamSeekType,
+        sender: oneshot::Sender<StreamingResponseResult>,
     },
     GetLastSent {
         sender: oneshot::Sender<instant::Instant>,
@@ -41,15 +42,15 @@ enum RTMPDataClientCommand {
 }
 
 #[derive(Clone)]
-pub struct RtmpPublisherClient {
-    sender: SenderRtmpData,
+pub struct StreamPublisherClient {
+    sender: SenderStreamingData,
 }
 
-impl RtmpPublisherClient {
-    pub async fn feed_data(&self, rtmp_data: Vec<SignedRtmpData>) -> anyhow::Result<()> {
+impl StreamPublisherClient {
+    pub async fn feed_data(&self, data: Vec<SignedStreamingData>) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(RTMPDataClientCommand::NewRTMPData { rtmp_data, sender })
+            .send(StreamingDataClientCommand::NewStreamingData { data, sender })
             .await?;
         tokio::task::yield_now().await;
         receiver.await?
@@ -58,11 +59,11 @@ impl RtmpPublisherClient {
     pub async fn get_data(
         &self,
         peer: PeerId,
-        seek_type: RTMPDataSeekType,
-    ) -> anyhow::Result<RTMPStreamingResponseResult> {
+        seek_type: StreamSeekType,
+    ) -> anyhow::Result<StreamingResponseResult> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(RTMPDataClientCommand::GetRTMPData {
+            .send(StreamingDataClientCommand::GetStreamingData {
                 peer,
                 seek_type,
                 sender,
@@ -75,7 +76,7 @@ impl RtmpPublisherClient {
     pub async fn get_last_sent(&self) -> anyhow::Result<instant::Instant> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(RTMPDataClientCommand::GetLastSent { sender })
+            .send(StreamingDataClientCommand::GetLastSent { sender })
             .await?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
@@ -84,29 +85,29 @@ impl RtmpPublisherClient {
     pub async fn die(&self) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(RTMPDataClientCommand::Die { sender })
+            .send(StreamingDataClientCommand::Die { sender })
             .await?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
 }
 
-async fn _rtmp_publisher_daemon(
-    streaming_key: RtmpStreamingKey,
+async fn _stream_publisher_daemon(
+    streaming_key: StreamingKey,
     mut network: NetworkBackendClient,
-    mut command_receiver: mpsc::Receiver<RTMPDataClientCommand>,
-    record: RtmpStreamingRecord,
+    mut command_receiver: mpsc::Receiver<StreamingDataClientCommand>,
+    record: StreamingRecord,
 ) -> anyhow::Result<()> {
-    const MAX_BUFFER_RESPONSES: usize = 5000;
+    const MAX_BUFFER_RESPONSES: usize = 10000;
     // Note: responses here are saved in the "reverse order" compare to other lists in other places
     // This means that the left/head is the newest data and the right/tail is the oldest
     // We do that to enable truncate to remove old items from the right/tail end
-    let mut video_header: Option<Arc<SignedRtmpData>> = None;
-    let mut audio_header: Option<Arc<SignedRtmpData>> = None;
-    let mut last_video_keyframe: Option<Arc<SignedRtmpData>> = None;
-    let mut last_video: Option<Arc<SignedRtmpData>> = None;
-    let mut last_audio: Option<Arc<SignedRtmpData>> = None;
-    let mut consumers: HashMap<PeerId, VecDeque<Arc<SignedRtmpData>>> = HashMap::new();
+    let mut video_header: Option<Arc<SignedStreamingData>> = None;
+    let mut audio_header: Option<Arc<SignedStreamingData>> = None;
+    let mut last_video_keyframe: Option<Arc<SignedStreamingData>> = None;
+    let mut last_video: Option<Arc<SignedStreamingData>> = None;
+    let mut last_audio: Option<Arc<SignedStreamingData>> = None;
+    let mut consumers: HashMap<PeerId, VecDeque<Arc<SignedStreamingData>>> = HashMap::new();
 
     let mut last_sent = instant::Instant::now();
     let mut published = false;
@@ -114,59 +115,66 @@ async fn _rtmp_publisher_daemon(
     loop {
         tokio::task::yield_now().await;
         match command_receiver.recv().await {
-            Some(RTMPDataClientCommand::NewRTMPData { rtmp_data, sender })
-                if rtmp_data.is_empty() =>
+            Some(StreamingDataClientCommand::NewStreamingData { data, sender })
+                if data.is_empty() =>
             {
-                log::debug!("RTMPDataClientCommand::NewRTMPData empty data received");
+                log::debug!("StreamingDataClientCommand::NewStreamingData empty data received");
                 sender.send(Ok(())).map_err(utils::send_error)?;
                 tokio::task::yield_now().await;
             }
 
-            Some(RTMPDataClientCommand::NewRTMPData { rtmp_data, sender }) => {
+            Some(StreamingDataClientCommand::NewStreamingData { data, sender }) => {
                 let mut failure_processing_responses = false;
-                let new_responses = rtmp_data
+                let new_responses = data
                     .into_iter()
-                    .map(|r| {
-                        let frame_type = RTMPFrameType::classify(&r.rtmp_data.data);
-                        let r = Arc::new(r);
-                        match frame_type {
-                            RTMPFrameType::VideoSequenceHeader => {
-                                log::info!(
-                                    "Received video sequence header for {:?}",
-                                    streaming_key
-                                );
-                                video_header.replace(Arc::clone(&r));
-                                last_video_keyframe.take();
-                            }
-                            RTMPFrameType::VideoKeyframe => {
-                                log::debug!("Received RTMPFrameType::VideoKeyframe");
-                                last_video_keyframe.replace(Arc::clone(&r));
-                            }
-                            RTMPFrameType::AudioSequenceHeader => {
-                                log::info!(
-                                    "Received audio sequence header for {:?}",
-                                    streaming_key
-                                );
-                                audio_header.replace(Arc::clone(&r));
-                                last_audio.take();
-                            }
-                            RTMPFrameType::Video => {
-                                log::trace!("Received RTMPFrameType::Video");
-                                last_video.replace(Arc::clone(&r));
-                            }
-                            RTMPFrameType::KeyAudio => {
-                                log::trace!("Received RTMPFrameType::KeyAudio");
-                                last_audio.replace(Arc::clone(&r));
-                            }
-                            RTMPFrameType::Invalid => {
-                                log::warn!("Received RTMPFrameType::Invalid");
-                                failure_processing_responses = true;
-                            }
-                            RTMPFrameType::Other => {
-                                log::info!("Received RTMPFrameType::Other");
-                            }
-                        };
-                        r
+                    .map(|r| match r.streaming_data.data_type {
+                        StreamingDataType::RtmpAudio | StreamingDataType::RtmpVideo => {
+                            let frame_type = RTMPFrameType::classify(&r.streaming_data.data);
+                            let r = Arc::new(r);
+                            match frame_type {
+                                RTMPFrameType::VideoSequenceHeader => {
+                                    log::info!(
+                                        "Received video sequence header for {:?}",
+                                        streaming_key
+                                    );
+                                    video_header.replace(Arc::clone(&r));
+                                    last_video_keyframe.take();
+                                }
+                                RTMPFrameType::VideoKeyframe => {
+                                    log::debug!("Received RTMPFrameType::VideoKeyframe");
+                                    last_video_keyframe.replace(Arc::clone(&r));
+                                }
+                                RTMPFrameType::AudioSequenceHeader => {
+                                    log::info!(
+                                        "Received audio sequence header for {:?}",
+                                        streaming_key
+                                    );
+                                    audio_header.replace(Arc::clone(&r));
+                                    last_audio.take();
+                                }
+                                RTMPFrameType::Video => {
+                                    log::trace!("Received RTMPFrameType::Video");
+                                    last_video.replace(Arc::clone(&r));
+                                }
+                                RTMPFrameType::KeyAudio => {
+                                    log::trace!("Received RTMPFrameType::KeyAudio");
+                                    last_audio.replace(Arc::clone(&r));
+                                }
+                                RTMPFrameType::Invalid => {
+                                    log::warn!("Received RTMPFrameType::Invalid");
+                                    failure_processing_responses = true;
+                                }
+                                RTMPFrameType::Other => {
+                                    log::info!("Received RTMPFrameType::Other");
+                                }
+                            };
+                            r
+                        }
+                        StreamingDataType::WebRtcRtpPacket => {
+                            let r = Arc::new(r);
+                            last_video.replace(Arc::clone(&r));
+                            r
+                        }
                     })
                     .collect_vec();
 
@@ -181,10 +189,7 @@ async fn _rtmp_publisher_daemon(
                 let mut consumers_to_remove = HashSet::new();
                 for (k, peer_responses) in &mut consumers {
                     if peer_responses.len() + new_responses.len() > MAX_BUFFER_RESPONSES {
-                        log::info!(
-                            "Removing {} as a peer to publish because will overflow queue",
-                            k
-                        );
+                        log::info!("Removing {k} as a peer to publish because will overflow queue");
                         consumers_to_remove.insert(*k); // TODO: perhaps avoid a complete reset?
                     } else {
                         for response in &new_responses {
@@ -205,10 +210,10 @@ async fn _rtmp_publisher_daemon(
                 }
             }
 
-            Some(RTMPDataClientCommand::GetRTMPData {
+            Some(StreamingDataClientCommand::GetStreamingData {
                 peer,
                 sender,
-                seek_type: RTMPDataSeekType::Reset,
+                seek_type: StreamSeekType::Reset,
             }) => {
                 consumers.remove(&peer);
                 let to_send = [
@@ -221,20 +226,17 @@ async fn _rtmp_publisher_daemon(
                 .into_iter()
                 .flatten()
                 .map(|r| r.as_ref().clone())
-                .sorted_by_key(|r| r.rtmp_data.source_offset)
+                .sorted_by_key(|r| r.streaming_data.source_offset)
                 .collect_vec();
                 log::info!(
-                    "Initializing {} responses for {} RTMPDataSeekType::Reset",
+                    "Initializing {} responses for {} StreamSeekType::Reset",
                     to_send.len(),
                     peer,
                 );
                 if !to_send.is_empty() {
                     last_sent = instant::Instant::now();
                 }
-                if sender
-                    .send(Ok(RtmpStreamingResponse::Data(to_send)))
-                    .is_err()
-                {
+                if sender.send(Ok(StreamingResponse::Data(to_send))).is_err() {
                     log::warn!(
                         "Requester of {:?} for peer {} died, resetting responses...",
                         streaming_key,
@@ -245,10 +247,10 @@ async fn _rtmp_publisher_daemon(
                 }
             }
 
-            Some(RTMPDataClientCommand::GetRTMPData {
+            Some(StreamingDataClientCommand::GetStreamingData {
                 peer,
                 sender,
-                seek_type: RTMPDataSeekType::Offset(n),
+                seek_type: StreamSeekType::Offset(n),
             }) => {
                 let base_data = [
                     &video_header,
@@ -258,14 +260,14 @@ async fn _rtmp_publisher_daemon(
                     &last_audio,
                 ];
                 let peer_responses = consumers.entry(peer).or_insert_with(|| {
-                    let new_responses: VecDeque<Arc<SignedRtmpData>> = base_data
+                    let new_responses: VecDeque<Arc<SignedStreamingData>> = base_data
                         .into_iter()
                         .flatten()
                         .cloned()
-                        .sorted_by_key(|r| r.rtmp_data.source_offset)
+                        .sorted_by_key(|r| r.streaming_data.source_offset)
                         .collect();
                     log::info!(
-                        "Initializing {} responses for {} RTMPDataSeekType::Offset({n:?})",
+                        "Initializing {} responses for {} StreamSeekType::Offset({n:?})",
                         new_responses.len(),
                         peer,
                     );
@@ -273,7 +275,7 @@ async fn _rtmp_publisher_daemon(
                 });
                 // remove old data
                 while let Some(p) = peer_responses.pop_front() {
-                    if p.rtmp_data.source_offset > n {
+                    if p.streaming_data.source_offset > n {
                         peer_responses.push_front(p); // this is new data, put back on responses
                         break;
                     }
@@ -281,17 +283,14 @@ async fn _rtmp_publisher_daemon(
                 // get new data
                 let to_send = peer_responses
                     .iter_mut()
-                    .filter(|r| r.rtmp_data.source_offset > n)
+                    .filter(|r| r.streaming_data.source_offset > n)
                     .map(|r| r.as_ref().clone())
-                    .take(rtmp_streaming::MAX_RESPONSES_PER_REQUEST)
+                    .take(media_streaming::MAX_RESPONSES_PER_REQUEST)
                     .collect_vec();
                 if !to_send.is_empty() {
                     last_sent = instant::Instant::now();
                 }
-                if sender
-                    .send(Ok(RtmpStreamingResponse::Data(to_send)))
-                    .is_err()
-                {
+                if sender.send(Ok(StreamingResponse::Data(to_send))).is_err() {
                     log::warn!(
                         "Requester of {:?} for peer {} died, resetting responses...",
                         streaming_key,
@@ -301,10 +300,10 @@ async fn _rtmp_publisher_daemon(
                 }
             }
 
-            Some(RTMPDataClientCommand::GetRTMPData {
+            Some(StreamingDataClientCommand::GetStreamingData {
                 peer,
                 sender,
-                seek_type: RTMPDataSeekType::Peek,
+                seek_type: StreamSeekType::Peek,
             }) => {
                 let most_recent_frame = [
                     &video_header,
@@ -315,23 +314,20 @@ async fn _rtmp_publisher_daemon(
                 ]
                 .into_iter()
                 .flatten()
-                .max_by_key(|r| r.rtmp_data.source_offset)
+                .max_by_key(|r| r.streaming_data.source_offset)
                 .map(|r| r.as_ref().clone());
                 let to_send = most_recent_frame.into_iter().collect_vec();
-                log::debug!("RTMPDataClientCommand::GetRTMPData seek_type: RTMPDataSeekType::Peek returning {} responses", to_send.len());
-                if sender
-                    .send(Ok(RtmpStreamingResponse::Data(to_send)))
-                    .is_err()
-                {
+                log::debug!("StreamingDataClientCommand::GetStreamingData seek_type: StreamSeekType::Peek returning {} responses", to_send.len());
+                if sender.send(Ok(StreamingResponse::Data(to_send))).is_err() {
                     log::warn!("Requester of {:?} for peer {} died,", streaming_key, peer);
                 }
             }
-            Some(RTMPDataClientCommand::GetLastSent { sender }) => {
+            Some(StreamingDataClientCommand::GetLastSent { sender }) => {
                 if sender.send(last_sent).is_err() {
                     log::warn!("Requester of GetLastSent {:?} died", streaming_key);
                 };
             }
-            Some(RTMPDataClientCommand::Die { sender }) => {
+            Some(StreamingDataClientCommand::Die { sender }) => {
                 if let Err(e) = publisher_unpublish(&mut network, &record).await {
                     log::warn!("Error unpublishing data for {streaming_key:?}: {e:?}");
                 } else {
@@ -351,7 +347,7 @@ async fn _rtmp_publisher_daemon(
 
 async fn publisher_unpublish(
     network: &mut NetworkBackendClient,
-    record: &RtmpStreamingRecord,
+    record: &StreamingRecord,
 ) -> anyhow::Result<()> {
     let key = &record.key;
     network.remove_record(key.clone()).await?;
@@ -359,19 +355,21 @@ async fn publisher_unpublish(
 }
 
 async fn publisher_publish(
-    streaming_key: &RtmpStreamingKey,
+    streaming_key: &StreamingKey,
     network: &mut NetworkBackendClient,
-    record: &RtmpStreamingRecord,
+    record: &StreamingRecord,
 ) -> anyhow::Result<()> {
-    debug!("rtmp_publisher_daemon initialization {:?}", streaming_key);
-    let kad_record = KademliaRecord::Rtmp(record.clone());
+    debug!("publisher_publish initialization {:?}", streaming_key);
+    let kad_record = KademliaRecord::MediaStreaming(record.clone());
     let kad_key = kad_record.key().clone();
     network.put_record(kad_record).await?;
     network
-        .start_providing_rtmp_streaming(kad_key.clone(), streaming_key.clone())
-        .await?;
+        .start_providing_streaming(kad_key.clone(), streaming_key.clone())
+        .await
+        .context("publisher_publish start_providing_streaming first error")?
+        .context("publisher_publish start_providing_streaming second error")?;
     // match network
-    //     .publish_gossip(kad_key.to_vec(), protocols::gossip::rtmp_keys_gossip())
+    //     .publish_gossip(kad_key.to_vec(), protocols::gossip::streaming_keys_gossip())
     //     .await?
     // {
     //     Ok(_) => {}
@@ -379,20 +377,20 @@ async fn publisher_publish(
     //     Err(e) => anyhow::bail!("Publish error: {e:?}"),
     // };
     network
-        .publish_gossip(kad_key.to_vec(), protocols::gossip::rtmp_keys_gossip())
+        .publish_gossip(kad_key.to_vec(), protocols::gossip::streaming_keys_gossip())
         .await?;
 
     Ok(())
 }
 
 pub(crate) async fn launch_daemon(
-    streaming_key: RtmpStreamingKey,
+    streaming_key: StreamingKey,
     shared_state: SharedGlobalState,
     network: NetworkBackendClient,
-    initializer: oneshot::Sender<anyhow::Result<RtmpPublisherClient>>,
-    record: RtmpStreamingRecord,
-) -> anyhow::Result<RtmpPublisherClient> {
-    log::debug!("Launching rtmp daemon for {:?}", &streaming_key);
+    initializer: oneshot::Sender<anyhow::Result<StreamPublisherClient>>,
+    record: StreamingRecord,
+) -> anyhow::Result<StreamPublisherClient> {
+    log::debug!("Launching stream daemon for {:?}", &streaming_key);
     let (command_sender, command_receiver) = tokio::sync::mpsc::channel(2);
     let client = match shared_state
         .active_streams
@@ -402,24 +400,24 @@ pub(crate) async fn launch_daemon(
     {
         std::collections::hash_map::Entry::Occupied(_) => {
             match initializer.send(Err(anyhow::anyhow!(
-                "While was launching rtmp publisher daemon already found a active stream for {:?}",
+                "While was launching stream publisher daemon already found a active stream for {:?}",
                 streaming_key
             ))) {
                 Ok(_) => {}
                 Err(_) => {
                     log::warn!(
-                        "Error telling initializer that rtmp publisher daemon failed for {:?}",
+                        "Error telling initializer that stream publisher daemon failed for {:?}",
                         streaming_key
                     );
                 }
             };
             anyhow::bail!(
-                "While was launching rtmp publisher daemon already found a active stream for {:?}",
+                "While was launching stream publisher daemon already found a active stream for {:?}",
                 streaming_key
             );
         }
         std::collections::hash_map::Entry::Vacant(entry) => {
-            let client = RtmpPublisherClient {
+            let client = StreamPublisherClient {
                 sender: command_sender,
             };
             entry.insert(client.clone());
@@ -435,7 +433,8 @@ pub(crate) async fn launch_daemon(
     utils::spawn_and_log_error({
         let client = client.clone();
         async move {
-            let r = _rtmp_publisher_daemon(streaming_key, network, command_receiver, record).await;
+            let r =
+                _stream_publisher_daemon(streaming_key, network, command_receiver, record).await;
             // Remove ourselves
             shared_state
                 .active_streams

@@ -15,8 +15,11 @@ use libp2p::{dcutr, floodsub, ping, PeerId, Swarm};
 
 use crate::configuration::Configuration;
 use crate::daemons::internal_network_events::{BroadcastableNetworkEvent, InternalNetworkEvent};
+use crate::protocols::delegated_streaming::{
+    self, DelegatedStreamingCodec, DelegatedStreamingProtocol,
+};
+use crate::protocols::media_streaming::{StreamingCodec, StreamingProtocol};
 use crate::protocols::payment_info::{PaymentInfoCodec, PaymentInfoProtocol};
-use crate::protocols::rtmp_streaming::{RTMPStreamingCodec, RTMPStreamingProtocol};
 use crate::protocols::simple_file_exchange::{SimpleFileExchangeCodec, SimpleFileExchangeProtocol};
 use crate::protocols::webrtc_signaling::{WebRtcSignalingCodec, WebRtcSignalingProtocol};
 use crate::protocols::{self, webrtc_signaling, ComposedBehaviour};
@@ -30,6 +33,9 @@ pub async fn build(
     event_sender: tokio::sync::mpsc::UnboundedSender<InternalNetworkEvent>,
     broadcast_event_sender: tokio::sync::broadcast::Sender<BroadcastableNetworkEvent>,
     webrtc_signaling_sender: tokio::sync::mpsc::UnboundedSender<webrtc_signaling::RequestEvent>,
+    delegated_streaming_sender: tokio::sync::mpsc::UnboundedSender<
+        delegated_streaming::RequestEvent,
+    >,
     transport: OurTransport,
 ) -> Swarm<ComposedBehaviour> {
     let my_peer_id = keypair.public().to_peer_id();
@@ -62,11 +68,11 @@ pub async fn build(
     let mut gossip = floodsub::Floodsub::new(my_peer_id);
 
     // gossip
-    //     .subscribe(&protocols::gossip::rtmp_keys_gossip())
+    //     .subscribe(&protocols::gossip::streaming_keys_gossip())
     //     .expect("to work");
-    gossip.subscribe(protocols::gossip::rtmp_keys_gossip());
+    gossip.subscribe(protocols::gossip::streaming_keys_gossip());
 
-    let rtmp_streaming_protocol_support = if configuration.disable_streaming {
+    let streaming_protocol_support = if configuration.disable_streaming {
         ProtocolSupport::Outbound // Won't be able to receive streaming requests
     } else {
         ProtocolSupport::Full
@@ -80,16 +86,21 @@ pub async fn build(
                 std::iter::once((SimpleFileExchangeProtocol(), ProtocolSupport::Full)),
                 rr_cfg.clone(),
             ),
-            rtmp_streaming: RequestResponse::new(
-                RTMPStreamingCodec {
+            media_streaming: RequestResponse::new(
+                StreamingCodec {
                     broadcast_event_sender: broadcast_event_sender.clone(),
                 },
-                std::iter::once((RTMPStreamingProtocol(), rtmp_streaming_protocol_support)),
+                std::iter::once((StreamingProtocol(), streaming_protocol_support)),
                 rr_cfg.clone(),
             ),
             webrtc_signaling: RequestResponse::new(
                 WebRtcSignalingCodec {},
                 std::iter::once((WebRtcSignalingProtocol(), ProtocolSupport::Full)),
+                rr_cfg.clone(),
+            ),
+            delegated_streaming: RequestResponse::new(
+                DelegatedStreamingCodec {},
+                std::iter::once((DelegatedStreamingProtocol(), ProtocolSupport::Full)),
                 rr_cfg.clone(),
             ),
             payment_info: RequestResponse::new(
@@ -119,6 +130,7 @@ pub async fn build(
             event_sender,
             broadcast_event_sender,
             webrtc_signaling_sender,
+            delegated_streaming_sender,
         },
         my_peer_id,
     )

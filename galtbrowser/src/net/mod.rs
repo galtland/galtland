@@ -1,20 +1,32 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::tokio::sync::{broadcast, mpsc};
-use galtcore::{daemons, networkbackendclient, peer_seeds, protocols, tokio};
+use galtcore::{daemons, networkbackendclient, protocols, tokio};
 use libp2p::futures::StreamExt;
 use libp2p::identity::{self};
+use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 
 use crate::transport;
 
 pub mod webrtc;
 
+#[derive(Debug)]
+pub(crate) enum ConnectionStatusUpdate {
+    SignalingState(String),
+    IceConnectionState(String),
+    IceGatheringState(String),
+}
 
-pub(crate) async fn start_websockets() -> anyhow::Result<webrtc::state::WebRtcState> {
+
+pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>(
+    mut connection_status_callback: F,
+) -> anyhow::Result<webrtc::state::WebRtcState> {
     let keypair = identity::Keypair::generate_ed25519();
 
     let my_peer_id = keypair.public().to_peer_id();
@@ -25,9 +37,10 @@ pub(crate) async fn start_websockets() -> anyhow::Result<webrtc::state::WebRtcSt
         peer_id: my_peer_id,
     };
 
-    let rendezvous_addresses: HashSet<Multiaddr> = peer_seeds::get_official_rendezvous_ws()
-        .into_iter()
-        .collect();
+    let rendezvous_addresses: HashSet<Multiaddr> = HashSet::new();
+    // peer_seeds::get_official_rendezvous_ws()
+    //     .into_iter()
+    //     .collect();
 
     let configuration = Configuration {
         disable_streaming: true,
@@ -47,6 +60,10 @@ pub(crate) async fn start_websockets() -> anyhow::Result<webrtc::state::WebRtcSt
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, webrtc_signaling_receiver) = mpsc::unbounded_channel();
+    let (delegated_streaming_sender, delegated_streaming_receiver) = mpsc::unbounded_channel();
+
+    let (connection_status_update_sender, mut connection_status_update_receiver) =
+        mpsc::unbounded_channel();
 
     let mut swarm = galtcore::swarm::build(
         configuration.clone(),
@@ -54,6 +71,7 @@ pub(crate) async fn start_websockets() -> anyhow::Result<webrtc::state::WebRtcSt
         event_sender,
         broadcast_event_sender.clone(),
         webrtc_signaling_sender,
+        delegated_streaming_sender,
         transport,
     )
     .await;
@@ -81,7 +99,17 @@ pub(crate) async fn start_websockets() -> anyhow::Result<webrtc::state::WebRtcSt
         gossip_listener_client,
     ));
 
-    let webrtc_state: webrtc::state::WebRtcState = Default::default();
+    let delegated_streaming_endpoint = Multiaddr::empty()
+        .with(Protocol::from(Ipv4Addr::LOCALHOST))
+        .with(Protocol::Tcp(8085))
+        .with(Protocol::Ws(Cow::from("/")));
+
+    match swarm.dial(delegated_streaming_endpoint.clone()) {
+        Ok(_) => log::info!("Dialing delegated streaming endpoint {delegated_streaming_endpoint}"),
+        Err(e) => log::warn!("Failed to dial {}: {}", delegated_streaming_endpoint, e),
+    };
+
+    let webrtc_state = webrtc::state::WebRtcState::new(networkbackendclient.clone());
     galtcore::utils::wspawn_and_log_error({
         let broadcast_event_receiver = broadcast_event_sender.subscribe();
         let webrtc_state = webrtc_state.clone();
@@ -90,11 +118,22 @@ pub(crate) async fn start_websockets() -> anyhow::Result<webrtc::state::WebRtcSt
                 .run_receive_loop(
                     broadcast_event_receiver,
                     webrtc_signaling_receiver,
-                    networkbackendclient,
+                    delegated_streaming_receiver,
+                    connection_status_update_sender,
+                    delegated_streaming_endpoint,
                 )
                 .await
         }
     });
+
+    galtcore::utils::wspawn_and_log_error(async move {
+        while let Some(event) = connection_status_update_receiver.recv().await {
+            connection_status_callback(event);
+        }
+        log::info!("Exiting from connection_status_update_receiver loop...");
+        Ok(())
+    });
+
 
     let mut discover_tick = wasm_timer::Interval::new(Duration::from_secs(30));
     galtcore::utils::spawn_and_log_error(async move {

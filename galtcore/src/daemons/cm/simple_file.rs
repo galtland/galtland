@@ -37,21 +37,31 @@ pub struct PublishSimpleFileInfo {
 #[derive(Debug)]
 pub struct GetSimpleFileInfo {
     pub hash: Vec<u8>,
-    pub sender: tokio::sync::mpsc::Sender<Result<SimpleFileResponse, String>>,
+    pub sender: tokio::sync::mpsc::Sender<
+        Result<Result<SimpleFileResponse, String>, libp2p::request_response::OutboundFailure>,
+    >,
 }
 
+//FIXME: too many error being converted to string in this function
 pub(crate) async fn handle_get(
-    mut network: NetworkBackendClient,
+    network: NetworkBackendClient,
     info: GetSimpleFileInfo,
 ) -> anyhow::Result<()> {
     let GetSimpleFileInfo { hash, sender } = info;
     debug!("handle_get {:?}", hash);
 
     let peers = match network.clone().get_providers(hash.clone()).await {
-        Ok(p) => p,
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            sender
+                .send(Ok(Err(format!("get providers error: {e}"))))
+                .await
+                .context("Expected receiver to be still up")?;
+            return Ok(());
+        }
         Err(e) => {
             sender
-                .send(Err(e.to_string()))
+                .send(Ok(Err(format!("error while getting providers: {e}"))))
                 .await
                 .context("Expected receiver to be still up")?;
             return Ok(());
@@ -61,7 +71,7 @@ pub(crate) async fn handle_get(
         Some(p) => p,
         None => {
             sender
-                .send(Err("No peers for file".to_string()))
+                .send(Ok(Err("No peers for file".to_string())))
                 .await
                 .context("Expected receiver to be still up")?;
             return Ok(());
@@ -74,26 +84,33 @@ pub(crate) async fn handle_get(
             .request_simple_file(file_request.clone(), *peer)
             .await
         {
-            Ok(Ok(r)) => {
+            Ok(Ok(Ok(r))) => {
                 let eof = r.eof;
                 sender
-                    .send(Ok(r))
+                    .send(Ok(Ok(r)))
                     .await
                     .context("Expected receiver to be still up")?;
                 if eof {
                     return Ok(());
                 }
             }
+            Ok(Ok(Err(e))) => {
+                sender
+                    .send(Ok(Err(format!("got a string error: {e}"))))
+                    .await
+                    .context("Expected receiver to be still up")?;
+                return Ok(());
+            }
             Ok(Err(e)) => {
                 sender
-                    .send(Err(e))
+                    .send(Ok(Err(format!("got a outbound failure: {e}"))))
                     .await
                     .context("Expected receiver to be still up")?;
                 return Ok(());
             }
             Err(e) => {
                 sender
-                    .send(Err(e.to_string()))
+                    .send(Ok(Err(e.to_string())))
                     .await
                     .context("Expected receiver to be still up")?;
                 return Ok(());
@@ -103,7 +120,7 @@ pub(crate) async fn handle_get(
 }
 
 pub(crate) async fn handle_publish(
-    mut network: NetworkBackendClient,
+    network: NetworkBackendClient,
     info: PublishSimpleFileInfo,
 ) -> anyhow::Result<()> {
     let PublishSimpleFileInfo {
@@ -146,7 +163,7 @@ pub(crate) async fn handle_publish(
 
 pub(crate) async fn handle_respond(
     shared_state: SharedGlobalState,
-    mut network: NetworkBackendClient,
+    network: NetworkBackendClient,
     info: RespondSimpleFileInfo,
 ) -> anyhow::Result<()> {
     let RespondSimpleFileInfo {

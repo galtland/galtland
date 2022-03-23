@@ -18,25 +18,19 @@ pub struct WebRtcSignalingProtocol();
 #[derive(Clone)]
 pub struct WebRtcSignalingCodec();
 
-#[derive(Debug)]
-pub struct SignalingRequest {
-    pub offer: Option<Vec<u8>>,
-    pub ice_candidates: Vec<Option<Vec<u8>>>,
-}
-
 #[derive(Debug, Default)]
-pub struct SignalingResponse {
-    pub answer: Option<Vec<u8>>,
+pub struct SignalingRequestOrResponse {
+    pub description: Option<Vec<u8>>,
     pub ice_candidates: Vec<Option<Vec<u8>>>,
 }
 
 pub struct RequestEvent {
     pub peer: PeerId,
-    pub request: SignalingRequest,
+    pub request: SignalingRequestOrResponse,
     pub channel: ResponseChannel<WebRtcSignalingResponseResult>,
 }
 
-pub type WebRtcSignalingResponseResult = Result<SignalingResponse, String>;
+pub type WebRtcSignalingResponseResult = Result<SignalingRequestOrResponse, String>;
 
 impl ProtocolName for WebRtcSignalingProtocol {
     fn protocol_name(&self) -> &[u8] {
@@ -46,10 +40,49 @@ impl ProtocolName for WebRtcSignalingProtocol {
 
 const MAX_SIZE: usize = 100_000;
 
+
+async fn deserialize_request_or_response<T: AsyncRead + Unpin + Send>(
+    io: &mut T,
+) -> io::Result<SignalingRequestOrResponse> {
+    let description = read_length_prefixed(io, MAX_SIZE).await?;
+    let description = if description.is_empty() {
+        None
+    } else {
+        Some(description)
+    };
+    let len = read_varint(io).await?;
+    let mut ice_candidates = Vec::with_capacity(len);
+    for _ in 0..len {
+        let i = read_length_prefixed(io, MAX_SIZE).await?;
+        let i = if i.is_empty() { None } else { Some(i) };
+        ice_candidates.push(i);
+    }
+    Ok(SignalingRequestOrResponse {
+        description,
+        ice_candidates,
+    })
+}
+
+async fn serialize_request_or_response<T: AsyncWrite + Unpin + Send>(
+    io: &mut T,
+    r: SignalingRequestOrResponse,
+) -> io::Result<()> {
+    utils::write_limited_length_prefixed(io, r.description.unwrap_or_default(), MAX_SIZE).await?;
+    utils::write_varint(io, r.ice_candidates.len()).await?;
+    for i in &r.ice_candidates {
+        let i = match i {
+            Some(i) => i.as_slice(),
+            None => &[],
+        };
+        utils::write_limited_length_prefixed(io, i, MAX_SIZE).await?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl RequestResponseCodec for WebRtcSignalingCodec {
     type Protocol = WebRtcSignalingProtocol;
-    type Request = SignalingRequest;
+    type Request = SignalingRequestOrResponse;
     type Response = WebRtcSignalingResponseResult;
 
     async fn read_request<T>(
@@ -60,19 +93,7 @@ impl RequestResponseCodec for WebRtcSignalingCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let offer = read_length_prefixed(io, MAX_SIZE).await?;
-        let offer = if offer.is_empty() { None } else { Some(offer) };
-        let len = read_varint(io).await?;
-        let mut ice_candidates = Vec::with_capacity(len);
-        for _ in 0..len {
-            let i = read_length_prefixed(io, MAX_SIZE).await?;
-            let i = if i.is_empty() { None } else { Some(i) };
-            ice_candidates.push(i);
-        }
-        Ok(SignalingRequest {
-            offer,
-            ice_candidates,
-        })
+        deserialize_request_or_response(io).await
     }
 
     async fn read_response<T>(
@@ -85,32 +106,14 @@ impl RequestResponseCodec for WebRtcSignalingCodec {
     {
         match read_varint(io).await? {
             1 => {
-                let s = read_length_prefixed(io, MAX_SIZE).await?;
-                let s = std::str::from_utf8(&s).map_err(crate::utils::utf8_error)?;
-                Ok(Err(s.to_string()))
+                let s = utils::read_to_string(io, MAX_SIZE, "WebRtcSignalingProtocol error string")
+                    .await?;
+                Ok(Err(s))
             }
-            2 => {
-                let answer = read_length_prefixed(io, MAX_SIZE).await?;
-                let answer = if answer.is_empty() {
-                    None
-                } else {
-                    Some(answer)
-                };
-                let len = read_varint(io).await?;
-                let mut ice_candidates = Vec::with_capacity(len);
-                for _ in 0..len {
-                    let i = read_length_prefixed(io, MAX_SIZE).await?;
-                    let i = if i.is_empty() { None } else { Some(i) };
-                    ice_candidates.push(i);
-                }
-                Ok(Ok(SignalingResponse {
-                    answer,
-                    ice_candidates,
-                }))
-            }
+            2 => Ok(Ok(deserialize_request_or_response(io).await?)),
             other => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Error reading response: {other} is a invalid code"),
+                format!("Error reading SignalingRequestOrResponse: {other} is a invalid code"),
             )),
         }
     }
@@ -119,21 +122,12 @@ impl RequestResponseCodec for WebRtcSignalingCodec {
         &mut self,
         _: &WebRtcSignalingProtocol,
         io: &mut T,
-        r: SignalingRequest,
+        r: SignalingRequestOrResponse,
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        utils::write_limited_length_prefixed(io, r.offer.unwrap_or_default(), MAX_SIZE).await?;
-        utils::write_varint(io, r.ice_candidates.len()).await?;
-        for i in &r.ice_candidates {
-            let i = match i {
-                Some(i) => i.as_slice(),
-                None => &[],
-            };
-            utils::write_limited_length_prefixed(io, i, MAX_SIZE).await?;
-        }
-        Ok(())
+        serialize_request_or_response(io, r).await
     }
 
     async fn write_response<T>(
@@ -148,16 +142,7 @@ impl RequestResponseCodec for WebRtcSignalingCodec {
         match r {
             Ok(r) => {
                 utils::write_varint(io, 2).await?;
-                utils::write_limited_length_prefixed(io, r.answer.unwrap_or_default(), MAX_SIZE)
-                    .await?;
-                utils::write_varint(io, r.ice_candidates.len()).await?;
-                for i in &r.ice_candidates {
-                    let i = match i {
-                        Some(i) => i.as_slice(),
-                        None => &[],
-                    };
-                    utils::write_limited_length_prefixed(io, i, MAX_SIZE).await?;
-                }
+                serialize_request_or_response(io, r).await?;
             }
             Err(e) => {
                 utils::write_varint(io, 1).await?;
@@ -169,7 +154,7 @@ impl RequestResponseCodec for WebRtcSignalingCodec {
 }
 
 pub(crate) fn handle_event(
-    event: RequestResponseEvent<SignalingRequest, WebRtcSignalingResponseResult>,
+    event: RequestResponseEvent<SignalingRequestOrResponse, WebRtcSignalingResponseResult>,
     swarm: &mut Swarm<ComposedBehaviour>,
 ) {
     match event {
@@ -179,7 +164,7 @@ pub(crate) fn handle_event(
                 request,
                 channel,
             } => {
-                let offer_len = match &request.offer {
+                let offer_len = match &request.description {
                     Some(offer) => offer.len(),
                     None => 0,
                 };

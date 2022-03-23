@@ -6,17 +6,17 @@ use anyhow::Context;
 use libp2p::floodsub::FloodsubMessage;
 // use libp2p::gossipsub::GossipsubMessage;
 use libp2p::request_response::ResponseChannel;
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
-use super::cm::rtmp::handlers::{RespondPaymentInfo, RespondRTMPStreamingInfo};
 use super::cm::simple_file::RespondSimpleFileInfo;
-use super::cm::{ClientCommand, SentRTMPResponseStats};
+use super::cm::streaming::handlers::{RespondPaymentInfo, RespondStreamingInfo};
+use super::cm::{ClientCommand, SentStreamingResponseStats};
 use super::gossip_listener::GossipListenerClient;
 use crate::protocols::kademlia_record::KademliaRecord;
+use crate::protocols::media_streaming::{StreamingRequest, WrappedStreamingResponseResult};
 use crate::protocols::payment_info::{PaymentInfoRequest, PaymentInfoResponseResult};
-use crate::protocols::rtmp_streaming::{RTMPStreamingRequest, WrappedRTMPStreamingResponseResult};
 use crate::protocols::simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
 
 
@@ -28,10 +28,10 @@ pub enum InternalNetworkEvent {
         filename: String,
         channel: ResponseChannel<Result<SimpleFileResponse, String>>,
     },
-    InboundRTMPStreamingDataRequest {
+    InboundStreamingDataRequest {
         peer: PeerId,
-        request: RTMPStreamingRequest,
-        channel: ResponseChannel<WrappedRTMPStreamingResponseResult>,
+        request: StreamingRequest,
+        channel: ResponseChannel<WrappedStreamingResponseResult>,
     },
     InboundPaymentInfoRequest {
         peer: PeerId,
@@ -40,6 +40,7 @@ pub enum InternalNetworkEvent {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum BroadcastableNetworkEvent {
     ReceivedGossip {
@@ -49,7 +50,7 @@ pub enum BroadcastableNetworkEvent {
     PutRecord {
         record: KademliaRecord,
     },
-    SentRTMPResponseStats {
+    SentStreamingResponseStats {
         now: instant::Instant,
         peer: PeerId,
         write_duration: Duration,
@@ -58,6 +59,7 @@ pub enum BroadcastableNetworkEvent {
     },
     ConnectionEstablished {
         peer: PeerId,
+        endpoint: Multiaddr,
     },
 }
 
@@ -87,7 +89,7 @@ async fn handle_broadcast_network_event(
     event: BroadcastableNetworkEvent,
 ) -> anyhow::Result<()> {
     match event {
-        BroadcastableNetworkEvent::SentRTMPResponseStats {
+        BroadcastableNetworkEvent::SentStreamingResponseStats {
             peer,
             now,
             written_bytes,
@@ -95,8 +97,8 @@ async fn handle_broadcast_network_event(
             responses_count,
         } => {
             if client_command_sender
-                .send(ClientCommand::FeedSentRTMPResponseStats(
-                    SentRTMPResponseStats {
+                .send(ClientCommand::FeedSentStreamingResponseStats(
+                    SentStreamingResponseStats {
                         peer,
                         now,
                         written_bytes,
@@ -114,11 +116,11 @@ async fn handle_broadcast_network_event(
             gossip_listener_client.whisper(message).await
         }
         BroadcastableNetworkEvent::PutRecord { record } => {
-            if let KademliaRecord::Rtmp(r) = record {
-                gossip_listener_client.notify_rtmp_record(r).await;
+            if let KademliaRecord::MediaStreaming(r) = record {
+                gossip_listener_client.notify_streaming_record(r).await;
             }
         }
-        BroadcastableNetworkEvent::ConnectionEstablished { peer: _ } => {}
+        BroadcastableNetworkEvent::ConnectionEstablished { .. } => {}
     };
     Ok(())
 }
@@ -147,14 +149,14 @@ async fn handle_internal_network_event(
                 anyhow::bail!("receiver died")
             }
         }
-        InternalNetworkEvent::InboundRTMPStreamingDataRequest {
+        InternalNetworkEvent::InboundStreamingDataRequest {
             peer,
             request,
             channel,
         } => {
             if client_command_sender
-                .send(ClientCommand::RespondRTMPStreamingRequest(
-                    RespondRTMPStreamingInfo {
+                .send(ClientCommand::RespondStreamingRequest(
+                    RespondStreamingInfo {
                         peer,
                         request,
                         channel,

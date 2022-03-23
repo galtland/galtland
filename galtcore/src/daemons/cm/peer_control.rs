@@ -4,12 +4,12 @@ use std::time::Duration;
 use itertools::Itertools;
 use libp2p::PeerId;
 
-use crate::protocols::rtmp_streaming::{RTMPDataSeekType, RTMPStreamingRequest};
+use crate::protocols::media_streaming::{StreamSeekType, StreamingRequest};
 
 
 struct PeerStreamingRequest {
     time: instant::Instant,
-    request: RTMPStreamingRequest,
+    request: StreamingRequest,
 }
 
 
@@ -29,7 +29,7 @@ pub struct PeerControl {
 
 impl PeerControl {
     const BLACKLIST_DURATION: Duration = Duration::from_secs(60);
-    const FLOOD_MAX_REQUESTS_PER_KEY_PER_PERIOD: usize = 100;
+    const FLOOD_MAX_REQUESTS_PER_KEY_PER_PERIOD: usize = 1000;
     const FLOOD_PERIOD_OF_INTEREST: Duration = Duration::from_secs(10);
     const PROVIDE_FOR_PERIOD_OF_INTEREST: Duration = Duration::from_secs(60);
 
@@ -56,7 +56,7 @@ impl PeerControl {
     pub(crate) fn flood_control(
         &mut self,
         peer: &PeerId,
-        request: RTMPStreamingRequest,
+        request: StreamingRequest,
     ) -> FloodControlResult {
         let now = instant::Instant::now();
         if self.expire_blacklist(peer, now) {
@@ -78,7 +78,7 @@ impl PeerControl {
                 let avg_requests_per_key = requests_len / distinct_keys_len;
                 let max = Self::FLOOD_MAX_REQUESTS_PER_KEY_PER_PERIOD;
                 if avg_requests_per_key > max {
-                    log::debug!("Blacklisting {peer} because {avg_requests_per_key} (= {requests_len} / {distinct_keys_len}) > {max} ");
+                    log::debug!("Blacklisting {peer} because avg_requests_per_key {avg_requests_per_key} (= {requests_len} / {distinct_keys_len}) > {max} ");
                     self.blacklist(peer, now);
                     return FloodControlResult::Blacklisted;
                 }
@@ -88,7 +88,7 @@ impl PeerControl {
                     .iter()
                     .find(|r| r.request.streaming_key == request.streaming_key);
                 if let Some(p) = front {
-                    if p.request.seek_type != RTMPDataSeekType::Peek && p.request == request {
+                    if p.request.seek_type != StreamSeekType::Peek && p.request == request {
                         log::debug!("Blacklisting {peer} because request is repeated: {request:?}");
                         self.blacklist(peer, now);
                         return FloodControlResult::Blacklisted;

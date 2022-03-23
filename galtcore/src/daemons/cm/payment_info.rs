@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::rtmp::handlers::RespondPaymentInfo;
+use super::streaming::handlers::RespondPaymentInfo;
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::payment_info::models::PaymentInfo;
 use crate::protocols::payment_info::PaymentInfoResponse;
 
 pub(crate) async fn handle_respond(
-    mut network: NetworkBackendClient,
+    network: NetworkBackendClient,
     info: RespondPaymentInfo,
 ) -> anyhow::Result<()> {
     //FIXME: just a stub

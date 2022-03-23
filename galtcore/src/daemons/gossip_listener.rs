@@ -8,14 +8,16 @@ use libp2p::floodsub::FloodsubMessage;
 use libp2p::kad::record::Key;
 
 use crate::networkbackendclient::NetworkBackendClient;
-use crate::protocols::kademlia_record::{KademliaRecord, RtmpStreamingRecord};
+use crate::protocols::kademlia_record::{KademliaRecord, StreamingRecord};
 use crate::utils::{self, ArcMutex};
 
 type SubMessage = FloodsubMessage;
-pub enum GossipedRtmpRecord {
+
+#[allow(clippy::large_enum_variant)]
+pub enum GossipedStreamingRecord {
     Found {
         time: instant::Instant,
-        record: RtmpStreamingRecord,
+        record: StreamingRecord,
     },
     Searching(instant::Instant),
     Missing(instant::Instant),
@@ -24,7 +26,7 @@ pub enum GossipedRtmpRecord {
 #[derive(Default)]
 struct State {
     recent_messages: VecDeque<SubMessage>,
-    found_rtmp_records: HashMap<libp2p::kad::record::Key, GossipedRtmpRecord>,
+    found_streaming_records: HashMap<libp2p::kad::record::Key, GossipedStreamingRecord>,
 }
 
 #[derive(Clone)]
@@ -44,39 +46,39 @@ impl GossipListenerClient {
     }
 
     pub(crate) async fn whisper(&self, message: SubMessage) {
-        // if message.topic == crate::protocols::gossip::rtmp_keys_gossip().hash() {
+        // if message.topic == crate::protocols::gossip::streaming_keys_gossip().hash() {
         if message
             .topics
-            .contains(&crate::protocols::gossip::rtmp_keys_gossip())
+            .contains(&crate::protocols::gossip::streaming_keys_gossip())
         {
             let key: Key = message.data.to_vec().into();
-            self.notify_rtmp_key(key).await;
+            self.notify_streaming_key(key).await;
         }
         let mut state = self.state.lock().await;
         state.recent_messages.push_front(message);
         state.recent_messages.truncate(Self::MAX_RECENT_MESSAGES);
     }
 
-    pub(crate) async fn notify_rtmp_key(&self, key: Key) {
+    pub(crate) async fn notify_streaming_key(&self, key: Key) {
         let time = instant::Instant::now();
         self.state
             .lock()
             .await
-            .found_rtmp_records
-            .insert(key.clone(), GossipedRtmpRecord::Searching(time));
+            .found_streaming_records
+            .insert(key.clone(), GossipedStreamingRecord::Searching(time));
         let state = self.state.clone();
-        let mut network = self.network.clone();
+        let network = self.network.clone();
         utils::spawn_and_log_error(async move {
             const MAX_RETRIES: usize = 10;
             let mut i = 0;
             loop {
                 match network.get_record(key.clone()).await {
-                    Ok(KademliaRecord::Rtmp(record)) => {
+                    Ok(KademliaRecord::MediaStreaming(record)) => {
                         state
                             .lock()
                             .await
-                            .found_rtmp_records
-                            .insert(key, GossipedRtmpRecord::Found { time, record });
+                            .found_streaming_records
+                            .insert(key, GossipedStreamingRecord::Found { time, record });
                         return Ok(());
                     }
                     Ok(other) => {
@@ -94,8 +96,8 @@ impl GossipListenerClient {
                             log::warn!("Failed to get key {key:?}, giving up");
                             let mut state = state.lock().await;
                             state
-                                .found_rtmp_records
-                                .insert(key, GossipedRtmpRecord::Missing(time));
+                                .found_streaming_records
+                                .insert(key, GossipedStreamingRecord::Missing(time));
                             return Ok(());
                         }
                     }
@@ -104,22 +106,22 @@ impl GossipListenerClient {
         });
     }
 
-    pub(crate) async fn notify_rtmp_record(&self, record: RtmpStreamingRecord) {
+    pub(crate) async fn notify_streaming_record(&self, record: StreamingRecord) {
         let time = instant::Instant::now();
-        self.state.lock().await.found_rtmp_records.insert(
+        self.state.lock().await.found_streaming_records.insert(
             record.key.clone(),
-            GossipedRtmpRecord::Found { time, record },
+            GossipedStreamingRecord::Found { time, record },
         );
     }
 
-    pub async fn get_rtmp_records(&self) -> Vec<RtmpStreamingRecord> {
+    pub async fn get_streaming_records(&self) -> Vec<StreamingRecord> {
         self.state
             .lock()
             .await
-            .found_rtmp_records
+            .found_streaming_records
             .values()
             .filter_map(|v| match v {
-                GossipedRtmpRecord::Found { record, .. } => Some(record.clone()),
+                GossipedStreamingRecord::Found { record, .. } => Some(record.clone()),
                 _ => None,
             })
             .collect()

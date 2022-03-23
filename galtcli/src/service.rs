@@ -112,15 +112,24 @@ impl sm::service_server::Service for Service {
                 };
                 loop {
                     match backend_receiver.recv().await {
-                        Some(Ok(r)) => {
+                        Some(Ok(Ok(r))) => {
                             let r: Result<sm::GetSimpleFileResponse, Status> =
                                 Ok(sm::GetSimpleFileResponse { data: r.data });
                             if client_sender.send(r).await.is_err() {
                                 anyhow::bail!("receiver died")
                             };
                         }
-                        Some(Err(e)) => {
+                        Some(Ok(Err(e))) => {
                             if client_sender.send(Err(Status::internal(e))).await.is_err() {
+                                anyhow::bail!("receiver died")
+                            }
+                        }
+                        Some(Err(e)) => {
+                            if client_sender
+                                .send(Err(Status::internal(e.to_string())))
+                                .await
+                                .is_err()
+                            {
                                 anyhow::bail!("receiver died")
                             }
                         }
@@ -150,9 +159,9 @@ impl sm::service_server::Service for Service {
         &self,
         _: Request<sm::GetNetworkInfoRequest>,
     ) -> Result<Response<sm::GetNetworkInfoResponse>, Status> {
-        let mut network = self.network.clone();
+        let network = self.network.clone();
         let swarm_info = network.get_swarm_network_info().await;
-        let gossip_info = self.gossip_listener_client.get_rtmp_records().await;
+        let gossip_info = self.gossip_listener_client.get_streaming_records().await;
         let format_output = || -> anyhow::Result<String> {
             let mut s = String::new();
             writeln!(s, "\n{:?}\n", swarm_info)?;
@@ -161,11 +170,7 @@ impl sm::service_server::Service for Service {
             } else {
                 writeln!(s, "\nKnown Records:\n")?;
                 for i in gossip_info {
-                    writeln!(
-                        s,
-                        "{}/{}",
-                        i.streaming_key.app_name, i.streaming_key.stream_key
-                    )?;
+                    writeln!(s, "{}", i.streaming_key)?;
                 }
             }
             Ok(s)

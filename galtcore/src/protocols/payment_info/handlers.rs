@@ -6,7 +6,6 @@ use log::{debug, warn};
 
 use super::{PaymentInfoRequest, PaymentInfoResponseResult};
 use crate::protocols::{ComposedBehaviour, InternalNetworkEvent};
-use crate::utils;
 
 pub(crate) fn handle_event(
     event: RequestResponseEvent<PaymentInfoRequest, PaymentInfoResponseResult>,
@@ -65,7 +64,7 @@ pub(crate) fn handle_event(
                 .pending_payment_info_request
                 .remove(&request_id)
                 .expect("Request to still be pending")
-                .send(utils::to_simple_error(error))
+                .send(Err(error))
             {
                 log::warn!("Receiver dropped while trying to send: {e:?}")
             };

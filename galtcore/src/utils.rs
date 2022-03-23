@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::io;
-use std::str::Utf8Error;
+use std::string::FromUtf8Error;
 
 use bytes::BytesMut;
 use tokio::fs::File;
@@ -9,9 +9,9 @@ use tokio::io::{AsyncReadExt, BufReader};
 
 pub type ArcMutex<T> = std::sync::Arc<tokio::sync::Mutex<T>>;
 
-pub fn to_simple_error<T, E: std::fmt::Debug>(e: E) -> anyhow::Result<T> {
-    Err(anyhow::anyhow!("{:?}", e))
-}
+// pub fn to_simple_error<T, E: std::fmt::Debug>(e: E) -> anyhow::Result<T> {
+//     Err(anyhow::anyhow!("{:?}", e))
+// }
 
 pub async fn blake3_file_hash(filename: &str) -> Result<Vec<u8>, io::Error> {
     let mut hasher = blake3::Hasher::new();
@@ -72,9 +72,17 @@ where
     })
 }
 
+fn utf8_error(e: FromUtf8Error, context: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{context}: {e}"))
+}
 
-pub fn utf8_error(e: Utf8Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+pub async fn read_to_string<T: futures::AsyncRead + Unpin + Send>(
+    io: &mut T,
+    max_size: usize,
+    context: &str,
+) -> Result<String, std::io::Error> {
+    let s = libp2p::core::upgrade::read_length_prefixed(io, max_size).await?;
+    String::from_utf8(s).map_err(|e| crate::utils::utf8_error(e, context))
 }
 
 async fn write_length_prefixed(
@@ -136,7 +144,6 @@ pub fn measure<F: FnOnce() -> R, R>(prefix: &str, block: F) -> R {
 pub fn measure_noop<F: FnOnce() -> R, R>(_prefix: &str, block: F) -> R {
     block()
 }
-
 
 pub fn send_error<E>(_: E) -> anyhow::Error {
     anyhow::anyhow!("expected receiver to not be dropped")

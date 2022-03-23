@@ -2,8 +2,8 @@
 
 pub mod payment_info;
 pub mod peer_control;
-pub mod rtmp;
 pub mod simple_file;
+pub mod streaming;
 
 use std::collections::HashMap;
 use std::ops::Sub;
@@ -16,33 +16,34 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::{oneshot, Mutex};
 
 use self::peer_control::PeerControl;
-use self::rtmp::handlers::{
-    PlayRTMPStreamInfo, PublishRTMPStreamInfo, RespondPaymentInfo, RespondRTMPStreamingInfo,
-};
-use self::rtmp::rtmp_publisher::RtmpPublisherClient;
 use self::simple_file::{GetSimpleFileInfo, PublishSimpleFileInfo, RespondSimpleFileInfo};
+use self::streaming::handlers::{
+    PlayStreamInfo, PublishStreamInfo, RespondPaymentInfo, RespondStreamingInfo,
+};
+use self::streaming::stream_publisher::StreamPublisherClient;
 use crate::configuration::Configuration;
 use crate::networkbackendclient::NetworkBackendClient;
-use crate::protocols::rtmp_streaming::RtmpStreamingKey;
+use crate::protocols::media_streaming::StreamingKey;
 use crate::protocols::simple_file_exchange::SimpleFileResponse;
 use crate::protocols::NodeIdentity;
 use crate::utils;
 use crate::utils::ArcMutex;
 
+#[allow(clippy::large_enum_variant)]
 pub enum ClientCommand {
     RespondSimpleFile(RespondSimpleFileInfo),
     PublishSimpleFile(PublishSimpleFileInfo),
     GetSimpleFile(GetSimpleFileInfo),
-    PublishRTMPStream(PublishRTMPStreamInfo),
-    PlayRTMPStream(PlayRTMPStreamInfo),
-    RespondRTMPStreamingRequest(RespondRTMPStreamingInfo),
+    PublishStream(PublishStreamInfo),
+    PlayStream(PlayStreamInfo),
+    RespondStreamingRequest(RespondStreamingInfo),
     RespondPaymentInfoRequest(RespondPaymentInfo),
-    FeedSentRTMPResponseStats(SentRTMPResponseStats),
+    FeedSentStreamingResponseStats(SentStreamingResponseStats),
 }
 
 
 #[derive(Debug)]
-pub struct SentRTMPResponseStats {
+pub struct SentStreamingResponseStats {
     pub peer: PeerId,
     pub now: instant::Instant,
     pub written_bytes: usize,
@@ -57,7 +58,7 @@ struct SummarizedStats {
 }
 
 pub struct SentStats {
-    all_values: Vec<SentRTMPResponseStats>,
+    all_values: Vec<SentStreamingResponseStats>,
     summarized_peer_stats: HashMap<PeerId, SummarizedStats>,
 }
 
@@ -72,7 +73,7 @@ impl SentStats {
         }
     }
 
-    fn push(&mut self, info: SentRTMPResponseStats) {
+    fn push(&mut self, info: SentStreamingResponseStats) {
         match self.summarized_peer_stats.entry(info.peer) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 let s = e.get_mut();
@@ -112,9 +113,8 @@ pub struct SharedGlobalState {
     pub active_file_transfers: ArcMutex<
         HashMap<(PeerId, Vec<u8>), ArcMutex<Receiver<Result<SimpleFileResponse, String>>>>,
     >,
-    pub active_streams: ArcMutex<HashMap<RtmpStreamingKey, RtmpPublisherClient>>,
-    // pub stream_seeker: ArcMutex<HashMap<RtmpStreamingKey, tokio::task::JoinHandle<()>>>,
-    pub stream_seeker: ArcMutex<HashMap<RtmpStreamingKey, oneshot::Sender<()>>>,
+    pub active_streams: ArcMutex<HashMap<StreamingKey, StreamPublisherClient>>,
+    pub stream_seeker: ArcMutex<HashMap<StreamingKey, oneshot::Sender<()>>>,
     pub peer_control: ArcMutex<PeerControl>,
 }
 
@@ -166,16 +166,16 @@ async fn handle_client_command(
         ClientCommand::RespondPaymentInfoRequest(info) => {
             payment_info::handle_respond(network, info).await
         }
-        ClientCommand::PublishRTMPStream(info) => {
-            rtmp::handlers::publish(shared_state, network, info).await
+        ClientCommand::PublishStream(info) => {
+            streaming::handlers::publish(shared_state, network, info).await
         }
-        ClientCommand::PlayRTMPStream(info) => {
-            rtmp::handlers::play(identity, shared_state, network, info).await
+        ClientCommand::PlayStream(info) => {
+            streaming::handlers::play(identity, shared_state, network, info).await
         }
-        ClientCommand::RespondRTMPStreamingRequest(info) => {
-            rtmp::handlers::respond(opt, identity, shared_state, network, info).await
+        ClientCommand::RespondStreamingRequest(info) => {
+            streaming::handlers::respond(opt, identity, shared_state, network, info).await
         }
-        ClientCommand::FeedSentRTMPResponseStats(info) => {
+        ClientCommand::FeedSentStreamingResponseStats(info) => {
             shared_state.sent_stats.lock().await.push(info);
             Ok(())
         }

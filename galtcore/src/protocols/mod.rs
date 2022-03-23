@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 pub mod dcutr_behaviour;
+pub mod delegated_streaming;
 pub mod gossip;
 pub mod kademlia_record;
+pub mod media_streaming;
 pub mod payment_info;
 pub mod relay_server;
-pub mod rtmp_streaming;
 pub mod simple_file_exchange;
 pub mod webrtc_signaling;
 
@@ -27,19 +28,20 @@ use libp2p::kad::{
 use libp2p::relay::v2::relay;
 use libp2p::rendezvous::{self, Cookie};
 use libp2p::request_response::{RequestResponse, RequestResponseEvent};
-use libp2p::swarm::SwarmEvent;
+use libp2p::swarm::{DialError, SwarmEvent};
 use libp2p::{dcutr, floodsub, multiaddr, ping, PeerId, Swarm};
 use log::{debug, info, warn};
-use rtmp_streaming::{RTMPStreamingRequest, WrappedRTMPStreamingResponseResult};
+use media_streaming::{StreamingRequest, WrappedStreamingResponseResult};
 use simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use self::delegated_streaming::{DelegatedStreamingRequest, DelegatedStreamingResponseResult};
+use self::media_streaming::StreamingResponseResult;
 use self::payment_info::{PaymentInfoRequest, PaymentInfoResponseResult};
-use self::rtmp_streaming::RTMPStreamingResponseResult;
-use self::webrtc_signaling::{SignalingRequest, WebRtcSignalingResponseResult};
+use self::webrtc_signaling::{SignalingRequestOrResponse, WebRtcSignalingResponseResult};
 use crate::configuration::Configuration;
 use crate::daemons::internal_network_events::{BroadcastableNetworkEvent, InternalNetworkEvent};
-use crate::networkbackendclient::{NetworkBackendCommand, RequestRTMPDataParams};
+use crate::networkbackendclient::{NetworkBackendCommand, RequestStreamingDataParams};
 use crate::utils;
 
 pub const RENDEZVOUS_NAMESPACE: &str = "rendezvous";
@@ -91,7 +93,7 @@ pub(crate) fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<Co
                     .send(Ok(ok.providers))
                     .expect("Receiver not to be dropped");
             }
-            QueryResult::GetProviders(Err(GetProvidersError::Timeout { .. })) => {
+            QueryResult::GetProviders(Err(error)) => {
                 warn!("Timeout getting providers on query {:?}", id);
                 swarm
                     .behaviour_mut()
@@ -99,7 +101,7 @@ pub(crate) fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<Co
                     .pending_get_providers
                     .remove(&id)
                     .expect("Completed query to be previously pending")
-                    .send(Err(anyhow::anyhow!("GetProvidersError::Timeout")))
+                    .send(Err(error))
                     .expect("Receiver not to be dropped");
             }
             QueryResult::GetRecord(Ok(ok)) if ok.records.is_empty() => {
@@ -217,7 +219,7 @@ pub(crate) fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<Co
                         b.state.published_files_mapping.insert(key, filename); // FIXME: check if already exists and maybe return error, also remove if publish fails
                         sender
                     }
-                    StartProvidingAction::RTMPStreaming { sender } => sender,
+                    StartProvidingAction::MediaStreaming { sender } => sender,
                 };
                 sender.send(Ok(())).expect("Receiver not to be dropped");
             }
@@ -231,11 +233,9 @@ pub(crate) fn handle_kademlia_event(message: KademliaEvent, swarm: &mut Swarm<Co
                     .expect("Completed action to be previously pending");
                 let sender = match result {
                     StartProvidingAction::SimpleFile { sender, .. } => sender,
-                    StartProvidingAction::RTMPStreaming { sender, .. } => sender,
+                    StartProvidingAction::MediaStreaming { sender, .. } => sender,
                 };
-                sender
-                    .send(utils::to_simple_error(err))
-                    .expect("Receiver not to be dropped");
+                sender.send(Err(err)).expect("Receiver not to be dropped");
             }
             QueryResult::Bootstrap(i) => {
                 log::debug!("QueryResult::Bootstrap: {:?}", i);
@@ -532,7 +532,7 @@ pub fn handle_network_backend_command(
                 StartProvidingAction::SimpleFile { filename, sender },
             );
         }
-        NetworkBackendCommand::StartProvidingRTMPStreaming {
+        NetworkBackendCommand::StartProvidingStreaming {
             kad_key,
             streaming_key: _,
             sender,
@@ -545,7 +545,7 @@ pub fn handle_network_backend_command(
                 .context("Expected no store error")?; //FIXME: we need some sort of store cleanup
             b.state
                 .pending_start_providing
-                .insert(query_id, StartProvidingAction::RTMPStreaming { sender });
+                .insert(query_id, StartProvidingAction::MediaStreaming { sender });
         }
         NetworkBackendCommand::GetProviders { key, sender } => {
             let key = libp2p::kad::record::Key::new(&key);
@@ -625,27 +625,25 @@ pub fn handle_network_backend_command(
                 .cloned();
             sender.send(filename).map_err(utils::send_error)?;
         }
-        NetworkBackendCommand::RequestRTMPData {
-            params: RequestRTMPDataParams { peer, request },
+        NetworkBackendCommand::RequestStreamingData {
+            params: RequestStreamingDataParams { peer, request },
             sender,
         } => {
             let b = swarm.behaviour_mut();
-            let request_id = b.rtmp_streaming.send_request(&peer, request);
-            b.state
-                .pending_rtmp_streaming_request
-                .insert(request_id, sender);
+            let request_id = b.media_streaming.send_request(&peer, request);
+            b.state.pending_streaming_request.insert(request_id, sender);
         }
-        NetworkBackendCommand::RespondRTMPData {
+        NetworkBackendCommand::RespondStreamingData {
             peer,
             response,
             channel,
         } => {
             if swarm
                 .behaviour_mut()
-                .rtmp_streaming
+                .media_streaming
                 .send_response(
                     channel,
-                    WrappedRTMPStreamingResponseResult {
+                    WrappedStreamingResponseResult {
                         peer: Some(peer),
                         response,
                     },
@@ -715,6 +713,27 @@ pub fn handle_network_backend_command(
                 .pending_webrtc_signaling_request
                 .insert(request_id, sender);
         }
+        NetworkBackendCommand::RequestDelegatedStreaming {
+            request,
+            peer,
+            sender,
+        } => {
+            let b = swarm.behaviour_mut();
+            let request_id = b.delegated_streaming.send_request(&peer, request);
+            b.state
+                .pending_delegated_streaming_request
+                .insert(request_id, sender);
+        }
+        NetworkBackendCommand::RespondDelegatedStreaming { response, channel } => {
+            if swarm
+                .behaviour_mut()
+                .delegated_streaming
+                .send_response(channel, response)
+                .is_err()
+            {
+                log::warn!("Expected connection to peer to be still open while sending response");
+            };
+        }
     };
     Ok(())
 }
@@ -750,11 +769,11 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
         SwarmEvent::ConnectionEstablished {
             peer_id,
             endpoint,
-            num_established: _,
+            num_established,
             concurrent_dial_errors: _,
         } => {
             info!(
-                "SwarmEvent::ConnectionEstablished {} at {:?}",
+                "SwarmEvent::ConnectionEstablished {} at {:?} (num_established: {num_established:?})",
                 peer_id, endpoint
             );
             match &endpoint {
@@ -805,7 +824,10 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                 if swarm
                     .behaviour_mut()
                     .broadcast_event_sender
-                    .send(BroadcastableNetworkEvent::ConnectionEstablished { peer: peer_id })
+                    .send(BroadcastableNetworkEvent::ConnectionEstablished {
+                        peer: peer_id,
+                        endpoint: endpoint.clone(),
+                    })
                     .is_err()
                 {
                     log::warn!("Error sending BroadcastableNetworkEvent::ConnectionEstablished {{ {peer_id} }}");
@@ -828,15 +850,20 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                 "SwarmEvent::OutgoingConnectionError {:?}: {}",
                 peer_id, error
             );
-            //FIXME: if the outgoing connection is to a rendezvous we probably want to keep retrying
-            if let Some(_peer) = peer_id {
-                // TODO: check what makes sense here because it's possible to make multiple parallel connection attempts to a peer and just some fail
-                // swarm.behaviour_mut().kademlia.remove_peer(&peer);
+            // Note: if the outgoing connection is to a rendezvous we probably want to keep retrying
+            if let Some(peer) = &peer_id {
+                if let DialError::Transport(errors) = error {
+                    for (address, transport_error) in &errors {
+                        // TODO: probably blacklist the address
+                        log::debug!("Removing {address} from {peer} because: {transport_error:?}");
+                        swarm.behaviour_mut().kademlia.remove_address(peer, address);
+                    }
+                }
             }
         }
         SwarmEvent::Behaviour(behaviour) => match behaviour {
             ComposedEvent::SimpleFile(event) => simple_file_exchange::handle_event(event, swarm),
-            ComposedEvent::RTMPStreaming(event) => rtmp_streaming::handle_event(event, swarm),
+            ComposedEvent::MediaStreaming(event) => media_streaming::handle_event(event, swarm),
             ComposedEvent::PaymentInfo(event) => payment_info::handlers::handle_event(event, swarm),
             ComposedEvent::Kademlia(event) => handle_kademlia_event(event, swarm),
             // ComposedEvent::Mdns(event) => handle_mdns_event(event, swarm),
@@ -848,6 +875,9 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             ComposedEvent::Relay(event) => relay_server::handle(event, swarm),
             ComposedEvent::Dcutr(event) => dcutr_behaviour::handle(event, swarm),
             ComposedEvent::WebRtcSignaling(event) => webrtc_signaling::handle_event(event, swarm),
+            ComposedEvent::DelegatedStreaming(event) => {
+                delegated_streaming::handle_event(event, swarm)
+            }
         },
         SwarmEvent::BannedPeer { peer_id, endpoint } => {
             info!("SwarmEvent::BannedPeer {} at {:?}", peer_id, endpoint);
@@ -922,19 +952,24 @@ pub fn handle_discover_tick(opt: &Configuration, swarm: &mut Swarm<ComposedBehav
 pub enum StartProvidingAction {
     SimpleFile {
         filename: String,
-        sender: oneshot::Sender<anyhow::Result<()>>,
+        sender: oneshot::Sender<Result<(), libp2p::kad::AddProviderError>>,
     },
-    RTMPStreaming {
-        sender: oneshot::Sender<anyhow::Result<()>>,
+    MediaStreaming {
+        sender: oneshot::Sender<Result<(), libp2p::kad::AddProviderError>>,
     },
 }
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub enum ComposedEvent {
     SimpleFile(RequestResponseEvent<SimpleFileRequest, Result<SimpleFileResponse, String>>),
-    RTMPStreaming(RequestResponseEvent<RTMPStreamingRequest, WrappedRTMPStreamingResponseResult>),
+    MediaStreaming(RequestResponseEvent<StreamingRequest, WrappedStreamingResponseResult>),
     PaymentInfo(RequestResponseEvent<PaymentInfoRequest, PaymentInfoResponseResult>),
-    WebRtcSignaling(RequestResponseEvent<SignalingRequest, WebRtcSignalingResponseResult>),
+    WebRtcSignaling(
+        RequestResponseEvent<SignalingRequestOrResponse, WebRtcSignalingResponseResult>,
+    ),
+    DelegatedStreaming(
+        RequestResponseEvent<DelegatedStreamingRequest, DelegatedStreamingResponseResult>,
+    ),
     Kademlia(KademliaEvent),
     // Mdns(MdnsEvent),
     Identify(IdentifyEvent),
@@ -957,13 +992,11 @@ impl From<RequestResponseEvent<SimpleFileRequest, Result<SimpleFileResponse, Str
     }
 }
 
-impl From<RequestResponseEvent<RTMPStreamingRequest, WrappedRTMPStreamingResponseResult>>
+impl From<RequestResponseEvent<StreamingRequest, WrappedStreamingResponseResult>>
     for ComposedEvent
 {
-    fn from(
-        event: RequestResponseEvent<RTMPStreamingRequest, WrappedRTMPStreamingResponseResult>,
-    ) -> Self {
-        ComposedEvent::RTMPStreaming(event)
+    fn from(event: RequestResponseEvent<StreamingRequest, WrappedStreamingResponseResult>) -> Self {
+        ComposedEvent::MediaStreaming(event)
     }
 }
 
@@ -973,9 +1006,23 @@ impl From<RequestResponseEvent<PaymentInfoRequest, PaymentInfoResponseResult>> f
     }
 }
 
-impl From<RequestResponseEvent<SignalingRequest, WebRtcSignalingResponseResult>> for ComposedEvent {
-    fn from(event: RequestResponseEvent<SignalingRequest, WebRtcSignalingResponseResult>) -> Self {
+impl From<RequestResponseEvent<SignalingRequestOrResponse, WebRtcSignalingResponseResult>>
+    for ComposedEvent
+{
+    fn from(
+        event: RequestResponseEvent<SignalingRequestOrResponse, WebRtcSignalingResponseResult>,
+    ) -> Self {
         ComposedEvent::WebRtcSignaling(event)
+    }
+}
+
+impl From<RequestResponseEvent<DelegatedStreamingRequest, DelegatedStreamingResponseResult>>
+    for ComposedEvent
+{
+    fn from(
+        event: RequestResponseEvent<DelegatedStreamingRequest, DelegatedStreamingResponseResult>,
+    ) -> Self {
+        ComposedEvent::DelegatedStreaming(event)
     }
 }
 
@@ -1041,30 +1088,40 @@ pub struct RendezvousState {
 #[derive(Default)]
 pub struct NetworkState {
     pending_start_providing: HashMap<libp2p::kad::QueryId, StartProvidingAction>,
-    pending_get_providers:
-        HashMap<libp2p::kad::QueryId, oneshot::Sender<anyhow::Result<HashSet<libp2p::PeerId>>>>,
+    pending_get_providers: HashMap<
+        libp2p::kad::QueryId,
+        oneshot::Sender<Result<HashSet<libp2p::PeerId>, GetProvidersError>>,
+    >,
     pending_get_records: HashMap<Key, Vec<oneshot::Sender<anyhow::Result<KademliaRecord>>>>,
     cached_kademlia_records: HashMap<Key, KademliaRecord>,
     pending_put_records:
         HashMap<libp2p::kad::QueryId, (KademliaRecord, oneshot::Sender<anyhow::Result<()>>)>,
     pending_simple_file_request: HashMap<
         libp2p::request_response::RequestId,
-        oneshot::Sender<anyhow::Result<Result<SimpleFileResponse, String>>>,
-    >,
-    pending_rtmp_streaming_request: HashMap<
-        libp2p::request_response::RequestId,
         oneshot::Sender<
-            Result<RTMPStreamingResponseResult, libp2p::request_response::OutboundFailure>,
+            Result<Result<SimpleFileResponse, String>, libp2p::request_response::OutboundFailure>,
         >,
+    >,
+    pending_streaming_request: HashMap<
+        libp2p::request_response::RequestId,
+        oneshot::Sender<Result<StreamingResponseResult, libp2p::request_response::OutboundFailure>>,
     >,
     pending_payment_info_request: HashMap<
         libp2p::request_response::RequestId,
-        oneshot::Sender<anyhow::Result<PaymentInfoResponseResult>>,
+        oneshot::Sender<
+            Result<PaymentInfoResponseResult, libp2p::request_response::OutboundFailure>,
+        >,
     >,
     pending_webrtc_signaling_request: HashMap<
         libp2p::request_response::RequestId,
         oneshot::Sender<
             Result<WebRtcSignalingResponseResult, libp2p::request_response::OutboundFailure>,
+        >,
+    >,
+    pending_delegated_streaming_request: HashMap<
+        libp2p::request_response::RequestId,
+        oneshot::Sender<
+            Result<DelegatedStreamingResponseResult, libp2p::request_response::OutboundFailure>,
         >,
     >,
     published_files_mapping: HashMap<libp2p::kad::record::Key, String>,
@@ -1081,8 +1138,9 @@ pub struct PeerStatistics {
 #[behaviour(out_event = "ComposedEvent")]
 pub struct ComposedBehaviour {
     pub simple_file_exchange: RequestResponse<simple_file_exchange::SimpleFileExchangeCodec>,
-    pub rtmp_streaming: RequestResponse<rtmp_streaming::RTMPStreamingCodec>,
+    pub media_streaming: RequestResponse<media_streaming::StreamingCodec>,
     pub webrtc_signaling: RequestResponse<webrtc_signaling::WebRtcSignalingCodec>,
+    pub delegated_streaming: RequestResponse<delegated_streaming::DelegatedStreamingCodec>,
     pub payment_info: RequestResponse<payment_info::PaymentInfoCodec>,
     pub kademlia: Kademlia<MemoryStore>,
     // mdns: Mdns,
@@ -1102,6 +1160,8 @@ pub struct ComposedBehaviour {
     pub broadcast_event_sender: broadcast::Sender<BroadcastableNetworkEvent>,
     #[behaviour(ignore)]
     pub webrtc_signaling_sender: mpsc::UnboundedSender<webrtc_signaling::RequestEvent>,
+    #[behaviour(ignore)]
+    pub delegated_streaming_sender: mpsc::UnboundedSender<delegated_streaming::RequestEvent>,
 }
 
 #[derive(Clone)]

@@ -17,7 +17,6 @@ use galtcore::libp2p::{self, Multiaddr};
 use galtcore::tokio::sync::{broadcast, mpsc};
 use galtcore::{daemons, networkbackendclient, protocols, tokio, utils};
 use log::{info, warn};
-use nativecommon::rtmp_server;
 use service::sm;
 use tonic::transport::Uri;
 
@@ -83,6 +82,7 @@ async fn start_command(
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, webrtc_signaling_receiver) = mpsc::unbounded_channel();
+    let (delegated_streaming_sender, delegated_streaming_receiver) = mpsc::unbounded_channel();
     let transport = nativecommon::transport::our_transport(&keypair).await?;
     let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
         configuration.clone(),
@@ -90,20 +90,23 @@ async fn start_command(
         event_sender,
         broadcast_event_sender,
         webrtc_signaling_sender,
+        delegated_streaming_sender,
         transport,
     )
     .await;
 
     let (network_backend_command_sender, mut network_backend_command_receiver) = mpsc::channel(10);
-
     let (highlevel_command_sender, highlevel_command_receiver) = mpsc::channel(10);
 
     let networkbackendclient =
         networkbackendclient::NetworkBackendClient::new(network_backend_command_sender);
 
-    utils::spawn_and_log_error(nativecommon::webrtc::WebRtc::webrtc_signaling_loop(
+    utils::spawn_and_log_error(nativecommon::webrtc::WebRtc::webrtc_main_loop(
         webrtc_signaling_receiver,
+        delegated_streaming_receiver,
         networkbackendclient.clone(),
+        highlevel_command_sender.clone(),
+        identity.clone(),
     ));
 
     if !opt.no_listen {
@@ -139,12 +142,12 @@ async fn start_command(
         }
     }
 
-    utils::spawn_and_log_error(rtmp_server::accept_loop(
-        opt.rtmp_listen_address
-            .unwrap_or_else(|| "127.0.0.1:1935".parse().unwrap()),
-        identity.clone(),
-        highlevel_command_sender.clone(),
-    ));
+    // utils::spawn_and_log_error(rtmp_server::accept_loop(
+    //     opt.rtmp_listen_address
+    //         .unwrap_or_else(|| "127.0.0.1:1935".parse().unwrap()),
+    //     identity.clone(),
+    //     highlevel_command_sender.clone(),
+    // ));
 
     for address in rendezvous_addresses {
         match swarm.dial(address.clone()) {
@@ -219,9 +222,9 @@ async fn get_service_client(
         .authority(dst.to_string())
         .path_and_query("")
         .build()?;
-    Ok(service::sm::service_client::ServiceClient::connect(dst)
+    service::sm::service_client::ServiceClient::connect(dst)
         .await
-        .context("connecting to ")?)
+        .context("connecting to ")
 }
 
 async fn files_command(

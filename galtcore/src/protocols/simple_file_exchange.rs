@@ -26,6 +26,7 @@ pub struct SimpleFileRequest {
     pub key: Vec<u8>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct SimpleFileResponse {
     pub eof: bool,
     pub data: Vec<u8>,
@@ -66,11 +67,10 @@ impl RequestResponseCodec for SimpleFileExchangeCodec {
     {
         match read_varint(io).await? {
             usize::MAX => {
-                let data = read_length_prefixed(io, 10_000).await?;
-                match std::str::from_utf8(&data) {
-                    Ok(s) => Ok(Err(s.into())),
-                    Err(e) => Err(crate::utils::utf8_error(e)),
-                }
+                let data =
+                    utils::read_to_string(io, 10_000, "SimpleFileExchangeProtocol error string")
+                        .await?;
+                Ok(Err(data))
             }
             flags => {
                 let eof = flags == 1;
@@ -189,7 +189,7 @@ pub(crate) fn handle_event(
                 .pending_simple_file_request
                 .remove(&request_id)
                 .expect("Request to still be pending")
-                .send(utils::to_simple_error(error))
+                .send(Err(error))
                 .expect("Receiver not to be dropped");
         }
         RequestResponseEvent::InboundFailure {

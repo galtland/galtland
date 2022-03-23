@@ -43,8 +43,8 @@ use crate::daemons::internal_network_events::BroadcastableNetworkEvent;
 // }
 
 
-pub(crate) fn rtmp_keys_gossip() -> Topic {
-    Topic::new("new_rtmp_keys")
+pub(crate) fn streaming_keys_gossip() -> Topic {
+    Topic::new("new_media_streaming_keys")
 }
 
 pub(crate) fn handle_gossip(event: FloodsubEvent, swarm: &mut Swarm<ComposedBehaviour>) {

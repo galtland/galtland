@@ -2281,6 +2281,7 @@ dependencies = [
  "js-sys",
  "libp2p",
  "log",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -2322,6 +2323,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "blake3",
+ "bs58",
  "byte-unit",
  "bytes",
  "chrono",
@@ -4259,11 +4261,14 @@ dependencies = [
  "bytes",
  "chrono",
  "galtcore",
+ "instant",
+ "itertools 0.10.3",
  "libp2p",
  "log",
  "rml_rtmp",
  "tokio",
  "webrtc",
+ "webrtc-util",
 ]
 
 [[package]]

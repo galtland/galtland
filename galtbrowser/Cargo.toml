@@ -21,6 +21,7 @@ console_error_panic_hook = { version = "0.1.6", optional = true }
 web-sys = {version = "0.3.56", features = [
     "ErrorEvent",
     "Event",
+    "HtmlMediaElement",
     "MediaDevices",
     "MediaStream",
     "MediaStreamEvent",
@@ -38,11 +39,12 @@ web-sys = {version = "0.3.56", features = [
     "RtcPeerConnectionIceEvent",
     "RtcRtpSender",
     "RtcSdpType",
+    "RtcSessionDescription",
     "RtcSessionDescriptionInit",
     "RtcSignalingState",
     "RtcTrackEvent",
     "WebSocket",
-    "Window"
+    "Window",
 ]}
 
 js-sys = "0.3.56"
@@ -63,3 +65,4 @@ yew = "0.19.3"
 wasm-timer = "0.2.5"
 serde = "1.0.136"
 serde_json = "1.0.79"
+rand = "0.8.5"
