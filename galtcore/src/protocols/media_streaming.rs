@@ -29,15 +29,15 @@ pub struct StreamingCodec {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct StreamingKey {
-    pub video_key: Vec<u8>,
     pub channel_key: PeerId,
+    pub video_key: Vec<u8>,
 }
 
 impl std::fmt::Debug for StreamingKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamingKey")
-            .field("video_key", &hex::encode(&self.video_key))
             .field("channel_key", &self.channel_key)
+            .field("video_key", &bs58::encode(&self.video_key).into_string())
             .finish()
     }
 }
@@ -46,8 +46,8 @@ impl std::fmt::Display for StreamingKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
             "{}/{}",
-            hex::encode(&self.video_key),
-            self.channel_key
+            self.channel_key,
+            bs58::encode(&self.video_key).into_string(),
         ))
     }
 }
@@ -67,21 +67,26 @@ impl TryFrom<&str> for StreamingKey {
                 splitted.len()
             );
         }
-        let video_key = splitted[0].trim();
-        if video_key.is_empty() {
-            anyhow::bail!("video_key is empty");
-        }
-        let video_key = hex::decode(video_key).context("decoding hex video key")?;
 
-        let channel_key = splitted[1].trim();
+        let channel_key = splitted[0].trim();
         if channel_key.is_empty() {
             anyhow::bail!("channel_key is empty");
         }
-        let channel_key = bs58::decode(&channel_key).into_vec()?;
+        let channel_key = bs58::decode(&channel_key)
+            .into_vec()
+            .context("error decoding channel key")?;
 
         let channel_key: PeerId = channel_key
             .try_into()
             .map_err(|_| anyhow::anyhow!("Error converting channel key to peer id"))?;
+
+        let video_key = splitted[1].trim();
+        if video_key.is_empty() {
+            anyhow::bail!("video_key is empty");
+        }
+        let video_key = bs58::decode(&video_key)
+            .into_vec()
+            .context("error decoding video key")?;
 
         Ok(StreamingKey {
             video_key,
@@ -107,8 +112,8 @@ impl StreamingKey {
     pub(crate) fn hash_from_parts(video_key: &[u8], channel_key: &PeerId) -> Vec<u8> {
         blake3::hash(
             [
-                blake3::hash(video_key).as_bytes().as_slice(),
                 blake3::hash(&channel_key.to_bytes()).as_bytes().as_slice(),
+                blake3::hash(video_key).as_bytes().as_slice(),
             ]
             .concat()
             .as_slice(),
@@ -281,18 +286,11 @@ const MAX_SIZE: usize = 10_000_000;
 pub(crate) async fn deserialize_streaming_key<T: AsyncRead + Unpin + Send>(
     io: &mut T,
 ) -> io::Result<StreamingKey> {
-    let video_key = read_length_prefixed(io, 1_000).await?;
-    if video_key.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Empty video key",
-        ));
-    }
     let channel_key = read_length_prefixed(io, 1_000).await?;
     if channel_key.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Empty channel_key",
+            "Empty channel key",
         ));
     }
     let channel_key = match channel_key.try_into() {
@@ -300,10 +298,17 @@ pub(crate) async fn deserialize_streaming_key<T: AsyncRead + Unpin + Send>(
         Err(_) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Invalid channel_key",
+                "Invalid channel key",
             ))
         }
     };
+    let video_key = read_length_prefixed(io, 1_000).await?;
+    if video_key.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Empty video key",
+        ));
+    }
     Ok(StreamingKey {
         video_key,
         channel_key,
@@ -315,9 +320,9 @@ pub(crate) async fn serialize_streaming_key<T: AsyncWrite + Unpin + Send>(
     streaming_key: &StreamingKey,
 ) -> io::Result<usize> {
     let mut n = 0;
-    n += utils::write_limited_length_prefixed(io, &streaming_key.video_key, MAX_SIZE).await?;
     n += utils::write_limited_length_prefixed(io, streaming_key.channel_key.to_bytes(), MAX_SIZE)
         .await?;
+    n += utils::write_limited_length_prefixed(io, &streaming_key.video_key, MAX_SIZE).await?;
     Ok(n)
 }
 
@@ -674,7 +679,7 @@ mod tests {
 
     #[test]
     fn test_streaming_key_from_str_and_back() -> anyhow::Result<()> {
-        let s = "9b1122b2dc8724808f5d160b3fa1fdd382fc1da36abdd53dc569311f31ddd718/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let s = "12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo/5ezFfhtXGXtJcodB6E3Fu3cXTKkYERTGDH5x2JADMTZk";
         let k: StreamingKey = s.try_into()?;
         assert_eq!(s, k.to_string());
         Ok(())

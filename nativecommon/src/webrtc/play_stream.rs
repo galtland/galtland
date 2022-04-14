@@ -57,6 +57,7 @@ pub(super) async fn play(
         let tracks = Arc::clone(&tracks);
         async move {
             loop {
+                tokio::task::yield_now().await;
                 match publisher.get_data(peer, seek_type).await {
                     Ok(Ok(StreamingResponse::Data(data_vector))) if !data_vector.is_empty() => {
                         log::debug!(
@@ -143,8 +144,8 @@ pub(super) async fn play(
                         }
                     }
                     Ok(Ok(StreamingResponse::Data(_))) => {
-                        log::info!("Received empty data, sleeping a little");
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        log::debug!("Received empty data, sleeping a little");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Ok(Ok(StreamingResponse::MaxUploadRateReached)) => {
                         log::error!("Received StreamingResponse::MaxUploadRateReached");

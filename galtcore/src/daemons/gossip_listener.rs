@@ -72,6 +72,7 @@ impl GossipListenerClient {
             const MAX_RETRIES: usize = 10;
             let mut i = 0;
             loop {
+                tokio::task::yield_now().await;
                 match network.get_record(key.clone()).await {
                     Ok(KademliaRecord::MediaStreaming(record)) => {
                         state

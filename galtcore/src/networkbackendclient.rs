@@ -194,7 +194,7 @@ impl NetworkBackendClient {
         &self,
         key: Vec<u8>,
     ) -> anyhow::Result<Result<HashSet<PeerId>, libp2p::kad::GetProvidersError>> {
-        log::debug!("get_providers {:?}", key);
+        log::debug!("get_providers {:?}", hex::encode(&key));
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(NetworkBackendCommand::GetProviders { key, sender })

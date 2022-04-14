@@ -181,6 +181,7 @@ pub(crate) async fn respond(
     let mut empty_responses_count = 0;
     loop {
         let seek_type = request.seek_type;
+        tokio::task::yield_now().await;
         match stream_publisher_client.get_data(peer, seek_type).await {
             Ok(Ok(StreamingResponse::Data(r))) if r.is_empty() => {
                 empty_responses_count += 1;
@@ -193,7 +194,7 @@ pub(crate) async fn respond(
                 } else {
                     // FIXME: perhaps work with timeouts so we can always receive something
                     log::debug!("Got empty response, will sleep a little");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
             Ok(Ok(r)) => {

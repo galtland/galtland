@@ -111,6 +111,7 @@ impl sm::service_server::Service for Service {
                     anyhow::bail!("commands receiver died")
                 };
                 loop {
+                    tokio::task::yield_now().await;
                     match backend_receiver.recv().await {
                         Some(Ok(Ok(r))) => {
                             let r: Result<sm::GetSimpleFileResponse, Status> =

@@ -149,10 +149,12 @@ async fn start_command(
     //     highlevel_command_sender.clone(),
     // ));
 
-    for address in rendezvous_addresses {
-        match swarm.dial(address.clone()) {
-            Ok(_) => info!("Dialing rendezvous point address {}", address),
-            Err(e) => warn!("Failed to dial {}: {}", address, e),
+    if !opt.disable_rendezvous_register && !opt.disable_rendezvous_discover {
+        for address in rendezvous_addresses {
+            match swarm.dial(address.clone()) {
+                Ok(_) => info!("Dialing rendezvous point address {}", address),
+                Err(e) => warn!("Failed to dial {}: {}", address, e),
+            }
         }
     }
 
@@ -260,6 +262,7 @@ async fn files_command(
                         std::process::exit(1);
                     }
                 }
+                tokio::task::yield_now().await;
             }
         }
     }

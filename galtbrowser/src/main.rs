@@ -20,12 +20,16 @@ enum Msg {
     Connected,
     FailedToConnect,
     ShareScreen,
+    ShareAudioVideo,
     PublishedStream(StreamingKey),
+    PublishedAudioVideo(StreamingKey),
     ScreenShareFailed,
+    AudioVideoShareFailed,
     PlayStream(String),
     PlayingStream,
     StreamPlayFailed,
     UpdateConnectionStatus(ConnectionStatusUpdate),
+    SetDelegatedStreamingEndpoint(String),
 }
 
 #[derive(Default)]
@@ -33,6 +37,7 @@ struct Model {
     webrtc_state: Rc<RefCell<Option<webrtc::state::WebRtcState>>>,
     playing_stream: String,
     publishing_stream_key: String,
+    delegated_streaming_endpoint: String,
 
     signaling_state: String,
     ice_connection_state: String,
@@ -45,7 +50,10 @@ impl Component for Model {
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
-        Default::default()
+        Model {
+            delegated_streaming_endpoint: "/ip4/127.0.0.1/tcp/8085/ws".to_owned(),
+            ..Default::default()
+        }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -57,8 +65,14 @@ impl Component for Model {
                 let connection_status_callback = move |status: ConnectionStatusUpdate| {
                     link.send_message(Msg::UpdateConnectionStatus(status))
                 };
+                let delegated_streaming_endpoint = self.delegated_streaming_endpoint.clone();
                 ctx.link().send_future(async move {
-                    match net::start_websockets(connection_status_callback).await {
+                    match net::start_websockets(
+                        delegated_streaming_endpoint,
+                        connection_status_callback,
+                    )
+                    .await
+                    {
                         Ok(w) => {
                             webrtc_state.replace(Some(w));
                             Msg::Connected
@@ -92,10 +106,35 @@ impl Component for Model {
                 });
                 false
             }
+            Msg::ShareAudioVideo => {
+                ctx.link().send_future(async move {
+                    if let Some(state) = webrtc_state.borrow_mut().as_mut() {
+                        // FIXME: borrow_mut aborts if already borrowed
+                        match state.share_audio_video().await {
+                            Ok(streaming_key) => {
+                                log::info!("Audio/Video shared");
+                                Msg::PublishedAudioVideo(streaming_key)
+                            }
+                            Err(e) => {
+                                log::warn!("Audio/Video share error: {e:?}");
+                                Msg::AudioVideoShareFailed
+                            }
+                        }
+                    } else {
+                        todo!()
+                    }
+                });
+                false
+            }
             Msg::PublishedStream(streaming_key) => {
                 self.publishing_stream_key = streaming_key.to_string();
                 true
             }
+            Msg::PublishedAudioVideo(streaming_key) => {
+                self.publishing_stream_key = streaming_key.to_string();
+                true
+            }
+            Msg::AudioVideoShareFailed => false,
             Msg::ScreenShareFailed => false,
             Msg::FailedToConnect => false,
             Msg::PlayStream(next_stream) => {
@@ -134,6 +173,10 @@ impl Component for Model {
                 };
                 true
             }
+            Msg::SetDelegatedStreamingEndpoint(s) => {
+                self.delegated_streaming_endpoint = s;
+                false
+            }
         }
     }
 
@@ -147,6 +190,7 @@ impl Component for Model {
                     <div>{"ICE Connection State: "} { &self.ice_connection_state }</div>
                     <div>{"ICE Gathering State: "} { &self.ice_gathering_state }</div>
                     <button onclick={link.callback(|_| Msg::Connect)}>{ "Connect" }</button>
+                    <TextInput on_change={link.callback(Msg::SetDelegatedStreamingEndpoint)}  value={self.delegated_streaming_endpoint.clone()} />
                 </div>
                 <div class="readout">
                     <div><h2>{"Publish"}</h2></div>
@@ -157,6 +201,7 @@ impl Component for Model {
                         </span>
                     </div>
                     <button onclick={link.callback(|_| Msg::ShareScreen)}>{ "Share Screen & Publish" }</button>
+                    <button onclick={link.callback(|_| Msg::ShareAudioVideo)}>{ "Share Audio/Video & Publish" }</button>
                 </div>
                 <div class="entry">
                     <div><h2>{"Play"}</h2></div>

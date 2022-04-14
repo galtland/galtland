@@ -80,6 +80,7 @@ pub(crate) async fn handle_get(
 
     let file_request = SimpleFileRequest { key: hash };
     loop {
+        tokio::task::yield_now().await;
         match network
             .request_simple_file(file_request.clone(), *peer)
             .await

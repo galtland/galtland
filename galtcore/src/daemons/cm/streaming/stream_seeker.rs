@@ -81,6 +81,7 @@ async fn _stream_seeker_daemon(
     let record;
     {
         loop {
+            tokio::task::yield_now().await;
             if abort_receiver.try_recv().is_ok() {
                 log::info!("Aborted for {streaming_key:?}, exiting...");
                 return Ok(());
@@ -147,6 +148,7 @@ async fn _stream_seeker_daemon(
     let mut empty_data_count = 0;
     let mut consecutive_errors = 0;
     loop {
+        tokio::task::yield_now().await;
         if abort_receiver.try_recv().is_ok() {
             log::info!("Aborted for {streaming_key:?}, exiting...");
             return Ok(());

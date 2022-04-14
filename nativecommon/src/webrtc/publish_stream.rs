@@ -12,6 +12,7 @@ use galtcore::protocols::media_streaming::{
 use galtcore::protocols::NodeIdentity;
 use galtcore::tokio_stream::StreamExt;
 use galtcore::utils;
+use instant::Duration;
 use libp2p::futures::stream::FuturesUnordered;
 use tokio::sync::{mpsc, oneshot};
 use webrtc::track::track_remote::TrackRemote;
@@ -36,15 +37,28 @@ struct PacketReadContext {
     remote_track: Arc<TrackRemote>,
 }
 
+const WARN_READ_DURATION: Duration = Duration::from_millis(100);
 
 type RemoteTrackReadResult =
-    Result<(PacketReadContext, webrtc::rtp::packet::Packet), (PacketReadContext, webrtc::Error)>;
+    Result<(PacketReadContext, Vec<u8>), (PacketReadContext, webrtc::Error)>;
 
 async fn get_next_read(context: PacketReadContext) -> RemoteTrackReadResult {
-    match context.remote_track.read_rtp().await {
-        Ok((packet, _attributes)) => Ok((context, packet)),
+    let mut b = vec![0u8; 4096];
+    let now = instant::Instant::now();
+    let result = match context.remote_track.read(&mut b).await {
+        Ok((packet_size, _attributes)) => {
+            b.truncate(packet_size);
+            Ok((context, b))
+        }
         Err(e) => Err((context, e)),
+    };
+    let took = now.elapsed();
+    if took > WARN_READ_DURATION {
+        log::warn!("context.remote_track.read took: {:?}", took);
+    } else {
+        log::trace!("context.remote_track.read took: {:?}", took);
     }
+    result
 }
 
 pub(super) async fn publish(
@@ -125,13 +139,7 @@ pub(super) async fn publish(
             let mut sequence_id = 0;
             while let Some(result) = futures.next().await {
                 match result {
-                    Ok((context, packet)) => {
-                        let data = {
-                            let len = webrtc_util::marshal::MarshalSize::marshal_size(&packet);
-                            let mut b = vec![0; len];
-                            webrtc_util::marshal::Marshal::marshal_to(&packet, &mut b)?;
-                            b
-                        };
+                    Ok((context, data)) => {
                         log::trace!(
                             "Received packet for {:?} {:?} with {} bytes",
                             context.webrtc_track,
@@ -164,9 +172,9 @@ pub(super) async fn publish(
                         futures.push(get_next_read(context));
                     }
                 }
+                tokio::task::yield_now().await;
             }
             log::info!("Exiting loop for {streaming_key}");
-
             Ok(())
         }
     });

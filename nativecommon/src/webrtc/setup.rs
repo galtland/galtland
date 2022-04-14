@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use galtcore::rmp_serde;
+use galtcore::bincode;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -96,6 +96,7 @@ pub async fn prepare_connection() -> Result<(
                             tokio::select! {
                                 _ = timeout.as_mut() => {
                                     if let Some(pc) = pc2.upgrade() {
+                                        log::debug!("Writing PLI");
                                         result = pc.write_rtcp(&[Box::new(PictureLossIndication {
                                             sender_ssrc: 0,
                                             media_ssrc,
@@ -111,7 +112,6 @@ pub async fn prepare_connection() -> Result<(
                         log::warn!("Dropped receiver while sending track")
                     }
                 }
-
                 Box::pin(async {})
             },
         ))
@@ -186,12 +186,12 @@ pub(crate) async fn create_offer(connection: &Arc<RTCPeerConnection>) -> anyhow:
         .await
         .ok_or_else(|| anyhow::anyhow!("Empty local description"))?;
     let local_description =
-        rmp_serde::to_vec(&local_description).context("serializing session description")?;
+        bincode::serialize(&local_description).context("serializing session description")?;
     Ok(local_description)
 }
 
 pub(crate) async fn set_answer(connection: &RTCPeerConnection, d: &[u8]) -> anyhow::Result<()> {
-    let remote_description: RTCSessionDescription = rmp_serde::from_slice(d)?;
+    let remote_description: RTCSessionDescription = bincode::deserialize(d)?;
     connection
         .set_remote_description(remote_description)
         .await?;

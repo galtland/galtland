@@ -15,7 +15,7 @@ use galtcore::protocols::media_streaming::StreamingKey;
 use galtcore::protocols::webrtc_signaling::{self, SignalingRequestOrResponse};
 use galtcore::tokio::sync::{broadcast, mpsc, Mutex};
 use galtcore::utils::ArcMutex;
-use galtcore::{rmp_serde, tokio};
+use galtcore::{bincode, tokio};
 use libp2p::{Multiaddr, PeerId};
 use rand::Rng;
 use web_sys::{MediaStream, MediaStreamTrack, RtcPeerConnection};
@@ -176,6 +176,7 @@ impl WebRtcState {
                     }
                 }
             }
+            tokio::task::yield_now().await;
         }
     }
 
@@ -248,6 +249,7 @@ impl WebRtcState {
                                 .insert(webrtc_stream, (media_stream, media_stream_track));
                         }
                     };
+                    tokio::task::yield_now().await;
                 }
                 log::info!("Exiting from on_track_receiver loop...");
                 Ok(())
@@ -260,6 +262,7 @@ impl WebRtcState {
                 Self::create_offer(delegated_streaming_peer, &connection, &network).await?;
                 while on_negotiation_needed_receiver.recv().await.is_some() {
                     Self::create_offer(delegated_streaming_peer, &connection, &network).await?;
+                    tokio::task::yield_now().await;
                 }
                 log::info!(
                     "Exiting from on negotiation needed receiver for {delegated_streaming_peer}..."
@@ -304,6 +307,7 @@ impl WebRtcState {
                             "request_webrtc_signaling sending ice candidates last error: {e}"
                         )
                     };
+                    tokio::task::yield_now().await;
                 }
                 log::info!(
                     "Exiting from ice candidate receiver from {delegated_streaming_peer}..."
@@ -349,7 +353,7 @@ impl WebRtcState {
         for candidate in &event.request.ice_candidates {
             let my_ice_candidate = match candidate {
                 Some(candidate) => {
-                    let my_ice_candidate: MyRTCIceCandidateInit = rmp_serde::from_slice(candidate)
+                    let my_ice_candidate: MyRTCIceCandidateInit = bincode::deserialize(candidate)
                         .context("deserializing ice candidate init")?;
                     Some(my_ice_candidate)
                 }
@@ -371,7 +375,7 @@ impl WebRtcState {
     }
 
     fn serialize_ice_candidate(c: &MyRTCIceCandidateInit) -> anyhow::Result<Vec<u8>> {
-        rmp_serde::to_vec(c).context("serializing rtc ice candidate")
+        bincode::serialize(c).context("serializing rtc ice candidate")
     }
 
     async fn create_offer(
@@ -381,7 +385,7 @@ impl WebRtcState {
     ) -> anyhow::Result<()> {
         let session_description = setup::create_offer(connection).await?;
         let offer =
-            rmp_serde::to_vec(&session_description).context("serializing session description")?;
+            bincode::serialize(&session_description).context("serializing session description")?;
         let answer = match network
             .request_webrtc_signaling(
                 SignalingRequestOrResponse {
@@ -400,7 +404,7 @@ impl WebRtcState {
             }
         };
 
-        let answer: setup::MySessionDescription = rmp_serde::from_slice(
+        let answer: setup::MySessionDescription = bincode::deserialize(
             &answer.ok_or_else(|| anyhow::anyhow!("received none as answer"))?,
         )
         .context("deserializing session description")?;
@@ -431,17 +435,58 @@ impl WebRtcState {
                     connection_state.delegated_streaming_peer,
                 )
                 .await
-                .context("request_delegated_streaming sending play stream first error")?
-                .context("request_delegated_streaming sending play stream second error")?
+                .context("request_delegated_streaming sending share screen first error")?
+                .context("request_delegated_streaming sending share screen second error")?
             {
                 Ok(response) => response,
                 Err(e) => {
-                    anyhow::bail!("request_delegated_streaming sending play stream last error: {e}")
+                    anyhow::bail!(
+                        "request_delegated_streaming sending share screen last error: {e}"
+                    )
                 }
             };
             Ok(streaming_key)
         } else {
             anyhow::bail!("Trying to share screen but no active webrtc connection");
+        }
+    }
+
+    pub(crate) async fn share_audio_video(&mut self) -> anyhow::Result<StreamingKey> {
+        let user_media = setup::get_user_media().await?;
+        if let Some(connection_state) = self.connection_state.lock().await.as_ref() {
+            let tracks =
+                setup::share_audio_video(&user_media, &connection_state.connection).await?;
+            let channel_key = connection_state.delegated_streaming_peer;
+            let video_key = rand::thread_rng().gen::<[u8; 32]>();
+            let streaming_key = StreamingKey {
+                video_key: video_key.into(),
+                channel_key,
+            };
+            let _ = match self
+                .network
+                .request_delegated_streaming(
+                    DelegatedStreamingRequest::PublishStream(
+                        galtcore::protocols::delegated_streaming::PublishStreamInfo {
+                            streaming_key: streaming_key.clone(),
+                            tracks,
+                        },
+                    ),
+                    connection_state.delegated_streaming_peer,
+                )
+                .await
+                .context("request_delegated_streaming sending share audio video first error")?
+                .context("request_delegated_streaming sending share audio video second error")?
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    anyhow::bail!(
+                        "request_delegated_streaming sending share audio video last error: {e}"
+                    )
+                }
+            };
+            Ok(streaming_key)
+        } else {
+            anyhow::bail!("Trying to share audio video but no active webrtc connection");
         }
     }
 

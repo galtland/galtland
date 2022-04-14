@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use anyhow::Context;
 use galtcore::protocols::delegated_streaming::{WebRtcStream, WebRtcTrack};
-use galtcore::rmp_serde;
+use galtcore::bincode;
 use galtcore::tokio::sync::mpsc;
 use js_sys::{Array, Object, Reflect};
 use log::info;
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::{prelude::*, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    window, Event, HtmlMediaElement, MediaStream, MediaStreamTrack, RtcConfiguration,
-    RtcIceCandidate, RtcIceCandidateInit, RtcOfferOptions, RtcPeerConnection,
+    window, Event, HtmlMediaElement, MediaStream, MediaStreamConstraints, MediaStreamTrack,
+    RtcConfiguration, RtcIceCandidate, RtcIceCandidateInit, RtcOfferOptions, RtcPeerConnection,
     RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescription, RtcSessionDescriptionInit,
     RtcTrackEvent,
 };
@@ -358,7 +358,7 @@ pub(crate) async fn get_answer(
     remote_description: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
     let remote_description: MySessionDescription =
-        rmp_serde::from_slice(remote_description).context("deserializing remote offer")?;
+        bincode::deserialize(remote_description).context("deserializing remote offer")?;
     receive_answer(connection, &remote_description).await?;
 
     let p = connection.create_answer();
@@ -378,7 +378,7 @@ pub(crate) async fn get_answer(
         anyhow::anyhow!("get answer: set local description ({answer:?}) error: {e:?}")
     })?;
 
-    let serialized = rmp_serde::to_vec(answer).context("serializing answer to offer")?;
+    let serialized = bincode::serialize(answer).context("serializing answer to offer")?;
     Ok(serialized)
 }
 
@@ -394,4 +394,43 @@ pub(crate) fn play_video(stream: &MediaStream) -> anyhow::Result<()> {
         anyhow::bail!("Bug?!: missing video element");
     }
     Ok(())
+}
+
+pub(super) async fn get_user_media() -> anyhow::Result<MediaStream> {
+    let w = window().ok_or(anyhow::anyhow!("Missing window"))?;
+    let media_devices = w
+        .navigator()
+        .media_devices()
+        .map_err(|e| anyhow::anyhow!("Error getting media devices: {e:?}"))?;
+    let constraints = {
+        let mut c = MediaStreamConstraints::new();
+        c.audio(&true.into());
+        c.video(&true.into());
+        c
+    };
+    let user_media = media_devices
+        .get_user_media_with_constraints(&constraints)
+        .map_err(|e| anyhow::anyhow!("Error getting user media: {e:?}"))?;
+    let user_media: MediaStream = JsFuture::from(user_media)
+        .await
+        .map_err(|e| anyhow::anyhow!("Error waiting user media: {e:?}"))?
+        .into();
+    Ok(user_media)
+}
+
+pub(super) async fn share_audio_video(
+    user_media: &MediaStream,
+    connection: &RtcPeerConnection,
+) -> anyhow::Result<Vec<WebRtcTrack>> {
+    let mut webrtc_tracks = Vec::new();
+    let tracks = user_media.get_tracks();
+    for i in 0..tracks.length() {
+        let track: MediaStreamTrack = tracks.get(i).into();
+        webrtc_tracks.push(WebRtcTrack {
+            track_id: track.id(),
+            stream_id: WebRtcStream(user_media.id()),
+        });
+        connection.add_track(&track, user_media, &js_sys::Array::new());
+    }
+    Ok(webrtc_tracks)
 }

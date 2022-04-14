@@ -17,7 +17,7 @@ use galtcore::protocols::media_streaming::{MyRTCPFeedback, MyRTCRtpCodecCapabili
 use galtcore::protocols::webrtc_signaling::{self, SignalingRequestOrResponse};
 use galtcore::protocols::NodeIdentity;
 use galtcore::utils::ArcMutex;
-use galtcore::{rmp_serde, utils};
+use galtcore::{bincode, utils};
 use itertools::Itertools;
 use libp2p::PeerId;
 use tokio::sync::{mpsc, Mutex};
@@ -180,8 +180,8 @@ impl WebRtc {
                             anyhow::bail!("Error receiving offer answer: {e:?}");
                         }
                     };
-
                     log::debug!("Successfully sent offer and received WebRTC answer from {peer}");
+                    tokio::task::yield_now().await;
                 }
                 log::info!("Exiting from on negotiation needed loop...");
                 Ok(())
@@ -194,7 +194,7 @@ impl WebRtc {
         peer_state: PeerState,
         offer: &[u8],
     ) -> anyhow::Result<SignalingRequestOrResponse> {
-        let offer = rmp_serde::from_slice(offer)?;
+        let offer = bincode::deserialize(offer)?;
         peer_state.connection.set_remote_description(offer).await?;
         let answer = peer_state.connection.create_answer(None).await?;
         // Sets the LocalDescription, and starts our UDP listeners
@@ -205,7 +205,7 @@ impl WebRtc {
             .await
             .ok_or_else(|| anyhow::anyhow!("Empty local description"))?;
         let answer =
-            rmp_serde::to_vec(&local_description).context("serializing session description")?;
+            bincode::serialize(&local_description).context("serializing session description")?;
         let response = SignalingRequestOrResponse {
             description: Some(answer),
             ice_candidates: Vec::new(),
@@ -464,7 +464,7 @@ async fn process_ice_candidates(
     for candidate in ice_candidates {
         let candidate = match candidate {
             Some(candidate) => {
-                let candidate: RTCIceCandidateInit = rmp_serde::from_slice(candidate)
+                let candidate: RTCIceCandidateInit = bincode::deserialize(candidate)
                     .context("deserializing rtc ice candidate init")?;
                 candidate
             }
@@ -596,6 +596,7 @@ async fn track_receiver_loop(
                 }
             }
         };
+        tokio::task::yield_now().await;
     }
     log::info!("Track receiver for {peer} exiting...");
     Ok(())
@@ -628,6 +629,7 @@ async fn ice_candidate_receiver_loop(
         {
             log::warn!("request_webrtc_signaling sending ice candidates last error: {e}")
         }
+        tokio::task::yield_now().await;
     }
     log::info!("Exiting from ice candidate receiver for {peer}...");
     Ok(())
@@ -638,7 +640,7 @@ async fn serialize_ice_candidate(i: Option<RTCIceCandidate>) -> anyhow::Result<O
     match i {
         Some(i) => {
             let init = i.to_json().await?;
-            rmp_serde::to_vec(&init)
+            bincode::serialize(&init)
                 .context("serializing ice candidate init")
                 .map(Some)
         }
