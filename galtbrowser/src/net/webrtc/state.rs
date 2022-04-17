@@ -353,8 +353,9 @@ impl WebRtcState {
         for candidate in &event.request.ice_candidates {
             let my_ice_candidate = match candidate {
                 Some(candidate) => {
-                    let my_ice_candidate: MyRTCIceCandidateInit = bincode::deserialize(candidate)
-                        .context("deserializing ice candidate init")?;
+                    let my_ice_candidate: MyRTCIceCandidateInit =
+                        bincode::deserialize(candidate)
+                            .context("deserializing ice candidate init")?;
                     Some(my_ice_candidate)
                 }
                 None => None,

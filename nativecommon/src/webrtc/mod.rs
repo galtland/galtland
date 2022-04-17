@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 mod play_stream;
+pub mod publish_local_file;
 mod publish_stream;
 mod setup;
 

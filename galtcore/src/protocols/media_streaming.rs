@@ -76,9 +76,8 @@ impl TryFrom<&str> for StreamingKey {
             .into_vec()
             .context("error decoding channel key")?;
 
-        let channel_key: PeerId = channel_key
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Error converting channel key to peer id"))?;
+        let channel_key: PeerId =
+            PeerId::from_bytes(&channel_key).context("Error converting channel key to peer id")?;
 
         let video_key = splitted[1].trim();
         if video_key.is_empty() {
@@ -95,7 +94,7 @@ impl TryFrom<&str> for StreamingKey {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Serialize, Deserialize)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Serialize, Deserialize)]
 pub struct StreamOffset {
     pub timestamp_reference: u32,
     pub sequence_id: u32,

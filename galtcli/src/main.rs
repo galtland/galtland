@@ -13,10 +13,12 @@ use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::libp2p::futures::StreamExt;
 use galtcore::libp2p::identity::{self, ed25519};
 use galtcore::libp2p::multiaddr::Protocol;
-use galtcore::libp2p::{self, Multiaddr};
+use galtcore::libp2p::{self, Multiaddr, PeerId};
+use galtcore::protocols::media_streaming::StreamingKey;
 use galtcore::tokio::sync::{broadcast, mpsc};
 use galtcore::{daemons, networkbackendclient, protocols, tokio, utils};
 use log::{info, warn};
+use rand::Rng;
 use service::sm;
 use tonic::transport::Uri;
 
@@ -34,9 +36,9 @@ async fn main() -> anyhow::Result<()> {
         MainCommands::Start(opt) => start_command(api_listen_address, opt).await,
         MainCommands::Files(opt) => files_command(api_listen_address, opt).await,
         MainCommands::Network(opt) => network_command(api_listen_address, opt).await,
+        MainCommands::Stream(opt) => stream_command(api_listen_address, opt).await,
     }
 }
-
 
 async fn start_command(
     api_listen_address: Option<std::net::SocketAddr>,
@@ -169,7 +171,7 @@ async fn start_command(
         configuration.clone(),
         networkbackendclient.clone(),
         highlevel_command_receiver,
-        identity,
+        identity.clone(),
     ));
 
     let gossip_listener_client = GossipListenerClient::new(networkbackendclient.clone());
@@ -180,6 +182,7 @@ async fn start_command(
             commands: highlevel_command_sender.clone(),
             network: networkbackendclient.clone(),
             gossip_listener_client: gossip_listener_client.clone(),
+            identity,
         };
         log::info!("Starting service api on {api_address}");
         async move {
@@ -277,7 +280,12 @@ async fn network_command(
     match network_opt.command {
         NetworkCommands::Info => {
             match client.get_network_info(sm::GetNetworkInfoRequest {}).await {
-                Ok(r) => println!("{}", r.into_inner().info),
+                Ok(r) => {
+                    let r = r.into_inner();
+                    let peer_id = r.peer_id;
+                    let info = r.info;
+                    println!("Peer id: {peer_id:?}\n\n{info}");
+                }
                 Err(e) => {
                     eprintln!("{}", e)
                 }
@@ -286,6 +294,45 @@ async fn network_command(
     }
     Ok(())
 }
+
+async fn stream_command(
+    api_listen_address: Option<std::net::SocketAddr>,
+    opt: StreamOpt,
+) -> anyhow::Result<()> {
+    let mut client = get_service_client(api_listen_address).await?;
+    match opt.command {
+        StreamCommands::PublishFile(args) => {
+            let peer_id = match client.get_network_info(sm::GetNetworkInfoRequest {}).await {
+                Ok(r) => r.into_inner().peer_id,
+                Err(e) => {
+                    anyhow::bail!("error getting network info: {e}")
+                }
+            };
+            let video_stream_key = rand::thread_rng().gen::<[u8; 32]>();
+            let streaming_key = StreamingKey {
+                video_key: video_stream_key.into(),
+                channel_key: PeerId::from_bytes(&peer_id)?,
+            };
+            println!("Publishing to stream key:\n{streaming_key}");
+            match client
+                .stream_publish_file(sm::StreamPublishFileRequest {
+                    video_file: args.video_file,
+                    audio_file: args.audio_file,
+                    video_stream_key: video_stream_key.into(),
+                })
+                .await
+            {
+                Ok(r) => println!("Result: {}", r.into_inner().message),
+                Err(e) => {
+                    eprintln!("Application error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -344,8 +391,8 @@ enum MainCommands {
     Start(StartOpt),
     Files(FilesOpt),
     Network(NetworkOpt),
+    Stream(StreamOpt),
 }
-
 
 #[derive(clap::Args)]
 struct FilesAddOpt {
@@ -372,4 +419,22 @@ struct NetworkOpt {
 #[derive(Subcommand)]
 enum NetworkCommands {
     Info,
+}
+
+
+#[derive(clap::Args)]
+struct StreamOpt {
+    #[clap(subcommand)]
+    command: StreamCommands,
+}
+
+#[derive(Subcommand)]
+enum StreamCommands {
+    PublishFile(StreamPublishFileArgs),
+}
+
+#[derive(clap::Args)]
+struct StreamPublishFileArgs {
+    video_file: String,
+    audio_file: String,
 }

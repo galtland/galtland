@@ -3,8 +3,8 @@
 use std::rc::Rc;
 
 use anyhow::Context;
-use galtcore::protocols::delegated_streaming::{WebRtcStream, WebRtcTrack};
 use galtcore::bincode;
+use galtcore::protocols::delegated_streaming::{WebRtcStream, WebRtcTrack};
 use galtcore::tokio::sync::mpsc;
 use js_sys::{Array, Object, Reflect};
 use log::info;

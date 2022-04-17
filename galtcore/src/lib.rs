@@ -8,4 +8,4 @@ pub mod protocols;
 pub mod swarm;
 pub mod utils;
 
-pub use {libp2p, bincode, tokio, tokio_stream};
+pub use {bincode, libp2p, tokio, tokio_stream};

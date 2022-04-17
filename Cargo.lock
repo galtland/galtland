@@ -2415,6 +2415,7 @@ dependencies = [
  "nativecommon",
  "pretty_env_logger",
  "prost 0.9.0",
+ "rand 0.8.5",
  "serde_json",
  "sqlx",
  "tonic",

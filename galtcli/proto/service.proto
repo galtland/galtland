@@ -5,6 +5,7 @@ service Service {
     rpc AddSimpleFile (AddSimpleFileRequest) returns (AddSimpleFileResponse);
     rpc GetSimpleFile (GetSimpleFileRequest) returns (stream GetSimpleFileResponse);
     rpc GetNetworkInfo (GetNetworkInfoRequest) returns (GetNetworkInfoResponse);
+    rpc StreamPublishFile (StreamPublishFileRequest) returns (StreamPublishFileResponse);
 }
 
 message AddSimpleFileRequest {
@@ -12,9 +13,9 @@ message AddSimpleFileRequest {
 }
 
 message AddSimpleFileResponse {
-    string message = 1;
-    bool success = 2;
-    optional string blake3 = 3;
+   string message = 1;
+   bool success = 2;
+   optional string blake3 = 3;
 }
 
 message GetSimpleFileRequest {
@@ -27,6 +28,19 @@ message GetSimpleFileResponse {
 
 message GetNetworkInfoRequest {
 }
+
 message GetNetworkInfoResponse {
    string info = 1;
+   bytes peer_id = 2;
+}
+
+message StreamPublishFileRequest {
+   string video_file = 1;
+   string audio_file = 2;
+   bytes video_stream_key = 3;
+}
+
+message StreamPublishFileResponse {
+   string message = 1;
+   bool success = 2;
 }

@@ -8,6 +8,8 @@ use galtcore::daemons::cm::ClientCommand;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::libp2p::futures::{self, StreamExt};
 use galtcore::networkbackendclient::NetworkBackendClient;
+use galtcore::protocols::media_streaming::StreamingKey;
+use galtcore::protocols::NodeIdentity;
 use galtcore::tokio::sync::{mpsc, oneshot};
 use galtcore::tokio_stream::wrappers::ReceiverStream;
 use galtcore::{tokio, utils};
@@ -20,6 +22,7 @@ pub mod sm {
 
 pub struct Service {
     pub commands: mpsc::Sender<ClientCommand>,
+    pub identity: NodeIdentity,
     pub gossip_listener_client: GossipListenerClient,
     pub network: NetworkBackendClient,
 }
@@ -163,6 +166,12 @@ impl sm::service_server::Service for Service {
         let network = self.network.clone();
         let swarm_info = network.get_swarm_network_info().await;
         let gossip_info = self.gossip_listener_client.get_streaming_records().await;
+        let peer_id = self.identity.peer_id;
+        log::info!(
+            "peer id: {:?} {:?}",
+            peer_id.to_bytes(),
+            peer_id.to_base58()
+        );
         let format_output = || -> anyhow::Result<String> {
             let mut s = String::new();
             writeln!(s, "\n{:?}\n", swarm_info)?;
@@ -177,8 +186,51 @@ impl sm::service_server::Service for Service {
             Ok(s)
         };
         match format_output() {
-            Ok(info) => Ok(Response::new(sm::GetNetworkInfoResponse { info })),
+            Ok(info) => Ok(Response::new(sm::GetNetworkInfoResponse {
+                info,
+                peer_id: peer_id.into(),
+            })),
             Err(e) => Err(Status::internal(format!("Error formatting output: {e}"))),
         }
+    }
+
+    async fn stream_publish_file(
+        &self,
+        request: Request<sm::StreamPublishFileRequest>,
+    ) -> Result<Response<sm::StreamPublishFileResponse>, Status> {
+        info!("stream_publish_file: {:?}", request);
+        let r = request.into_inner();
+        let video_file = r.video_file;
+        let audio_file = r.audio_file;
+        let video_stream_key = r.video_stream_key;
+
+        let commands = self.commands.clone();
+        let identity = self.identity.clone();
+
+        let streaming_key = StreamingKey {
+            video_key: video_stream_key,
+            channel_key: identity.peer_id,
+        };
+
+        let result = nativecommon::webrtc::publish_local_file::publish(
+            video_file,
+            audio_file,
+            streaming_key,
+            commands,
+            identity,
+        )
+        .await;
+
+        let response = match result {
+            Ok(_) => sm::StreamPublishFileResponse {
+                message: "Ok".to_string(),
+                success: true,
+            },
+            Err(e) => sm::StreamPublishFileResponse {
+                message: format!("error publishing: {:?}", e),
+                success: false,
+            },
+        };
+        Ok(Response::new(response))
     }
 }
