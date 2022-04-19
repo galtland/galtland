@@ -212,7 +212,7 @@ impl sm::service_server::Service for Service {
             channel_key: identity.peer_id,
         };
 
-        let result = nativecommon::webrtc::publish_local_file::publish(
+        let result = nativecommon::webrtc::publish_local_file::publish3(
             video_file,
             audio_file,
             streaming_key,
