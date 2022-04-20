@@ -128,7 +128,7 @@ async fn _stream_publisher_daemon(
                 let new_responses = data
                     .into_iter()
                     .map(|r| match r.streaming_data.data_type {
-                        StreamingDataType::RtmpAudio | StreamingDataType::RtmpVideo => {
+                        StreamingDataType::RtmpAudio(_) | StreamingDataType::RtmpVideo(_) => {
                             let frame_type = RTMPFrameType::classify(&r.streaming_data.data);
                             let r = Arc::new(r);
                             match frame_type {

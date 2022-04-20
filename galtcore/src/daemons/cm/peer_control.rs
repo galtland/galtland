@@ -29,7 +29,7 @@ pub struct PeerControl {
 
 impl PeerControl {
     const BLACKLIST_DURATION: Duration = Duration::from_secs(60);
-    const FLOOD_MAX_REQUESTS_PER_KEY_PER_PERIOD: usize = 1000;
+    const FLOOD_MAX_REQUESTS_PER_KEY_PER_PERIOD: usize = 100000;
     const FLOOD_PERIOD_OF_INTEREST: Duration = Duration::from_secs(10);
     const PROVIDE_FOR_PERIOD_OF_INTEREST: Duration = Duration::from_secs(60);
 

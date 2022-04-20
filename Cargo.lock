@@ -2112,6 +2112,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flavors"
+version = "0.2.0"
+source = "git+https://github.com/rust-av/flavors#c48542aef94b7da36d6f306f4016bee9c79e09ba"
+dependencies = [
+ "nom 7.1.0",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4387,8 +4395,10 @@ name = "nativecommon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bs58",
  "bytes",
  "chrono",
+ "flavors",
  "galtcore",
  "hex",
  "instant",

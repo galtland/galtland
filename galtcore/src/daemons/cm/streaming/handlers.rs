@@ -185,7 +185,7 @@ pub(crate) async fn respond(
         match stream_publisher_client.get_data(peer, seek_type).await {
             Ok(Ok(StreamingResponse::Data(r))) if r.is_empty() => {
                 empty_responses_count += 1;
-                if empty_responses_count >= 10 {
+                if empty_responses_count >= 50 {
                     log::info!("Answering with empty response because we can't await anymore, request get data: {peer} {seek_type:?}");
                     network
                         .respond_streaming_data(peer, Ok(StreamingResponse::Data(r)), channel)

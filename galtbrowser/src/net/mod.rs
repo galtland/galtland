@@ -13,6 +13,7 @@ use crate::transport;
 
 pub mod webrtc;
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub(crate) enum ConnectionStatusUpdate {
     SignalingState(String),

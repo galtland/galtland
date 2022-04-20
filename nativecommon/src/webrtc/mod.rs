@@ -476,7 +476,7 @@ async fn process_ice_candidates(
     Ok(())
 }
 
-fn from_codec_capability(
+pub(crate) fn from_codec_capability(
     c: webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
 ) -> MyRTCRtpCodecCapability {
     MyRTCRtpCodecCapability {

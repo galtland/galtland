@@ -6,7 +6,7 @@ use galtcore::daemons::cm::{self, ClientCommand};
 use galtcore::protocols::delegated_streaming::{self, WebRtcTrack};
 use galtcore::protocols::kademlia_record::StreamingRecord;
 use galtcore::protocols::media_streaming::{
-    MyRTCRtpCodecCapability, SignedStreamingData, StreamMetadata, StreamOffset, StreamTrack,
+    IntegerStreamTrack, MyRTCRtpCodecCapability, SignedStreamingData, StreamMetadata, StreamOffset,
     StreamingData, StreamingDataType,
 };
 use galtcore::protocols::NodeIdentity;
@@ -26,13 +26,13 @@ pub(super) enum DelegatedStreamingPublishingState {
     },
     Publishing {
         info: delegated_streaming::PublishStreamInfo,
-        tracks: HashMap<StreamTrack, (MyRTCRtpCodecCapability, Arc<TrackRemote>)>,
+        tracks: HashMap<IntegerStreamTrack, (MyRTCRtpCodecCapability, Arc<TrackRemote>)>,
     },
 }
 
 struct PacketReadContext {
     metadata: StreamMetadata,
-    stream_track: StreamTrack,
+    stream_track: IntegerStreamTrack,
     webrtc_track: WebRtcTrack,
     remote_track: Arc<TrackRemote>,
 }
@@ -108,7 +108,7 @@ pub(super) async fn publish(
             }
         };
         let track_id = i;
-        let stream_track = StreamTrack {
+        let stream_track = IntegerStreamTrack {
             stream_id,
             track_id,
         };

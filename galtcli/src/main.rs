@@ -144,12 +144,12 @@ async fn start_command(
         }
     }
 
-    // utils::spawn_and_log_error(rtmp_server::accept_loop(
-    //     opt.rtmp_listen_address
-    //         .unwrap_or_else(|| "127.0.0.1:1935".parse().unwrap()),
-    //     identity.clone(),
-    //     highlevel_command_sender.clone(),
-    // ));
+    utils::spawn_and_log_error(nativecommon::rtmp_server2::accept_loop(
+        opt.rtmp_listen_address
+            .unwrap_or_else(|| "127.0.0.1:1935".parse().unwrap()),
+        identity.clone(),
+        highlevel_command_sender.clone(),
+    ));
 
     if !opt.disable_rendezvous_register && !opt.disable_rendezvous_discover {
         for address in rendezvous_addresses {

@@ -128,15 +128,20 @@ pub struct StreamingRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RtmpMetadata {
+    pub timestamp: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamingDataType {
-    RtmpAudio,
-    RtmpVideo,
+    RtmpAudio(RtmpMetadata),
+    RtmpVideo(RtmpMetadata),
     WebRtcRtpPacket,
 }
 
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StreamTrack {
+pub struct IntegerStreamTrack {
     pub stream_id: u8,
     pub track_id: u8,
 }
@@ -149,11 +154,11 @@ pub struct MyRTCPFeedback {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MyRTCRtpCodecCapability {
-    pub mime_type: String,
-    pub clock_rate: u32,
     pub channels: u16,
-    pub sdp_fmtp_line: String,
+    pub clock_rate: u32,
+    pub mime_type: String,
     pub rtcp_feedback: Vec<MyRTCPFeedback>,
+    pub sdp_fmtp_line: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,7 +170,7 @@ pub struct StreamMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingData {
     pub data: Vec<u8>,
-    pub stream_track: StreamTrack,
+    pub stream_track: IntegerStreamTrack,
     pub metadata: Option<StreamMetadata>,
     pub source_offset: StreamOffset,
     pub data_type: StreamingDataType,
@@ -175,12 +180,26 @@ impl StreamingData {
     pub(crate) fn hash(&self, salt: &[u8]) -> blake3::Hash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(salt);
-        match self.data_type {
-            StreamingDataType::RtmpAudio => hasher.update(&[0u8]),
-            StreamingDataType::RtmpVideo => hasher.update(&[1u8]),
-            StreamingDataType::WebRtcRtpPacket => hasher.update(&[2u8]),
+        match &self.data_type {
+            StreamingDataType::RtmpAudio(metadata) => {
+                hasher.update(&[0u8]);
+                hasher.update(&metadata.timestamp.to_be_bytes());
+            }
+            StreamingDataType::RtmpVideo(metadata) => {
+                hasher.update(&[1u8]);
+                hasher.update(&metadata.timestamp.to_be_bytes());
+            }
+            StreamingDataType::WebRtcRtpPacket => {
+                hasher.update(&[2u8]);
+            }
         };
         hasher.update(&self.data);
+        if let Some(m) = &self.metadata {
+            hasher.update(&m.capability.channels.to_be_bytes());
+            hasher.update(&m.capability.clock_rate.to_be_bytes());
+            hasher.update(m.capability.mime_type.as_bytes());
+            hasher.update(m.capability.sdp_fmtp_line.as_bytes());
+        }
         hasher.update(&self.source_offset.sequence_id.to_be_bytes());
         hasher.update(&self.source_offset.timestamp_reference.to_be_bytes());
         hasher.update(salt);

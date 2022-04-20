@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use galtcore::protocols::media_streaming::{
-    StreamMetadata, StreamOffset, StreamTrack, StreamingData, StreamingDataType,
+    IntegerStreamTrack, StreamMetadata, StreamOffset, StreamingData, StreamingDataType,
 };
 use rand::Rng;
 
@@ -8,7 +8,7 @@ use rand::Rng;
 fn create_fixture() -> StreamingData {
     let mut data = [0u8; 1024];
     rand::thread_rng().fill(&mut data);
-    let stream_track = StreamTrack {
+    let stream_track = IntegerStreamTrack {
         stream_id: rand::thread_rng().gen(),
         track_id: rand::thread_rng().gen(),
     };

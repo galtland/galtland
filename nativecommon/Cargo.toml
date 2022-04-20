@@ -28,3 +28,5 @@ instant = "0.1.12"
 webrtc-util = "0.5.3"
 mp4 = "0.10.0"
 hex = "0.4.3"
+flavors = { git = "https://github.com/rust-av/flavors", version = "0.2.0" }
+bs58 = "0.4.0"
