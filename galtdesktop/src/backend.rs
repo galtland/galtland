@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
+use anyhow::Context;
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::daemons::{self};
@@ -20,22 +21,24 @@ use crate::Cli;
 
 pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
     let mut db = appcommon::db::Db::get().await?;
-    let keypair = match opt.secret_key_seed {
+    let org_keypair = match opt.secret_key_seed {
         Some(seed) => {
             let mut bytes: [u8; 32] = [0u8; 32];
             bytes[0] = seed;
-            let secret_key = ed25519::SecretKey::from_bytes(&mut bytes).expect(
+            let secret_key = ed25519::SecretKey::from_bytes(&mut bytes).context(
                 "this returns `Err` only if the length is wrong; the length is correct; qed",
-            );
+            )?;
             identity::Keypair::Ed25519(secret_key.into())
         }
-        None => db.get_or_create_keypair().await?,
+        None => db.get_or_create_org_keypair().await?,
     };
+    let keypair = identity::Keypair::generate_ed25519();
     let my_peer_id = keypair.public().to_peer_id();
     info!("My public peer id is {}", my_peer_id);
     let identity = protocols::NodeIdentity {
         keypair: keypair.clone(),
         peer_id: my_peer_id,
+        org_keypair,
     };
 
     let mut rendezvous_addresses: HashSet<Multiaddr> =

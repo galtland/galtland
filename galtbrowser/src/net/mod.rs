@@ -29,6 +29,7 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
     let delegated_streaming_endpoint: Multiaddr = delegated_streaming_endpoint.parse()?;
 
     let keypair = identity::Keypair::generate_ed25519();
+    let org_keypair = identity::Keypair::generate_ed25519();
 
     let my_peer_id = keypair.public().to_peer_id();
 
@@ -36,6 +37,7 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
     let identity = protocols::NodeIdentity {
         keypair: keypair.clone(),
         peer_id: my_peer_id,
+        org_keypair,
     };
 
     let rendezvous_addresses: HashSet<Multiaddr> = HashSet::new();

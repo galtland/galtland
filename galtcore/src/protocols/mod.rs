@@ -1168,4 +1168,5 @@ pub struct ComposedBehaviour {
 pub struct NodeIdentity {
     pub keypair: Keypair,
     pub peer_id: PeerId,
+    pub org_keypair: Keypair,
 }

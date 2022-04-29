@@ -28,12 +28,12 @@ impl Db {
         Ok(Self { pool })
     }
 
-    pub async fn get_or_create_keypair(&mut self) -> anyhow::Result<Keypair> {
+    pub async fn get_or_create_org_keypair(&mut self) -> anyhow::Result<Keypair> {
         let mut c = self.pool.acquire().await?;
         let r = sqlx::query!(
             r#"
                 select keypair from keypairs
-                where name = 'default'
+                where name = 'org'
             "#
         )
         .fetch_optional(&mut c)
@@ -44,7 +44,7 @@ impl Db {
                 let k = identity::Keypair::generate_ed25519();
                 let blob = k.to_protobuf_encoding()?;
                 sqlx::query!(
-                    r#"insert into keypairs (keypair, name) values (?, 'default')"#,
+                    r#"insert into keypairs (keypair, name) values (?, 'org')"#,
                     blob
                 )
                 .execute(&mut c)

@@ -1,17 +1,6 @@
 {
   "db": "SQLite",
-  "249fe46786e59ba15a4b1aa297a47e4d5f3f1f6bb8b58c1a24cf1c0b63c70e9d": {
-    "query": "insert into keypairs (keypair, name) values (?, 'default')",
-    "describe": {
-      "columns": [],
-      "parameters": {
-        "Right": 1
-      },
-      "nullable": []
-    }
-  },
-  "6c8907ffad7cb88da0478aa3a9a6f30836934735e9f995e58f37fd1b753ba685": {
-    "query": "\n                select keypair from keypairs\n                where name = 'default'\n            ",
+  "23d0e2590d57354d6b5830435bac38fa2ddc73952a579c19353a4481673033f4": {
     "describe": {
       "columns": [
         {
@@ -20,12 +9,23 @@
           "type_info": "Blob"
         }
       ],
-      "parameters": {
-        "Right": 0
-      },
       "nullable": [
         false
-      ]
-    }
+      ],
+      "parameters": {
+        "Right": 0
+      }
+    },
+    "query": "\n                select keypair from keypairs\n                where name = 'org'\n            "
+  },
+  "29783ad2f81eabd8d98639d893be93bea63a36ab577673167c3281bdc0400f20": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "insert into keypairs (keypair, name) values (?, 'org')"
   }
 }
