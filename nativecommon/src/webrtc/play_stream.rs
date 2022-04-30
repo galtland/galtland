@@ -2,7 +2,7 @@ use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use anyhow::Context;
-use galtcore::daemons::cm::{self, ClientCommand};
+use galtcore::cm::{self, SharedGlobalState};
 use galtcore::networkbackendclient::NetworkBackendClient;
 use galtcore::protocols::delegated_streaming::{
     DelegatedStreamingRequest, PlayStreamNewTrackInfo, WebRtcStream, WebRtcTrack,
@@ -11,11 +11,12 @@ use galtcore::protocols::media_streaming::{
     IntegerStreamTrack, StreamOffset, StreamSeekType, StreamingDataType, StreamingKey,
     StreamingResponse,
 };
+use galtcore::protocols::NodeIdentity;
 use galtcore::utils;
 use galtcore::utils::ArcMutex;
 use instant::Duration;
 use libp2p::PeerId;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex};
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::TrackLocalWriter;
 
@@ -29,19 +30,21 @@ pub(super) async fn play(
     peer: PeerId,
     streaming_key: StreamingKey,
     peer_state: PeerState,
-    commands: mpsc::Sender<ClientCommand>,
-    network: NetworkBackendClient,
+    identity: NodeIdentity,
+    shared_global_state: SharedGlobalState,
+    mut network: NetworkBackendClient,
 ) -> anyhow::Result<DelegatedStreamingPlayingState> {
     let (sender, receiver) = oneshot::channel();
-    commands
-        .send(ClientCommand::PlayStream(
-            cm::streaming::handlers::PlayStreamInfo {
-                streaming_key: streaming_key.clone(),
-                sender,
-            },
-        ))
-        .await
-        .map_err(utils::send_error)?;
+    cm::modules::streaming::handlers::play(
+        identity,
+        &shared_global_state,
+        &mut network,
+        cm::modules::streaming::handlers::PlayStreamInfo {
+            streaming_key: streaming_key.clone(),
+            sender,
+        },
+    )
+    .await?;
     let publisher = receiver.await??;
 
     let mut seek_type = StreamSeekType::Reset;

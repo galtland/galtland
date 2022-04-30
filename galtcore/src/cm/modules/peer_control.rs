@@ -2,12 +2,33 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use itertools::Itertools;
+use libp2p::identify::IdentifyInfo;
 use libp2p::PeerId;
 
-use crate::protocols::media_streaming::{StreamSeekType, StreamingRequest};
+use crate::protocols::galt_identify::{GaltOrganization, KnownPeer, KnownPeerAddresses};
+use crate::protocols::media_streaming::{StreamSeekType, StreamingKey, StreamingRequest};
 
 
-struct PeerStreamingRequest {
+#[derive(Clone, Default)]
+pub struct PeerStatistics {
+    pub latency: Option<Duration>,
+    pub identify_info: Option<IdentifyInfo>,
+    pub org: Option<GaltOrganization>,
+}
+
+impl std::fmt::Display for PeerStatistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "Latency: {:?}, org: {:?}, listen addresses count: {:?}",
+            self.latency,
+            self.org,
+            self.identify_info.as_ref().map(|i| i.listen_addrs.len())
+        ))
+    }
+}
+
+#[derive(Clone)]
+pub struct PeerStreamingRequest {
     time: instant::Instant,
     request: StreamingRequest,
 }
@@ -19,12 +40,19 @@ pub enum FloodControlResult {
     StillBlacklisted,
     Blacklisted,
     Good,
+    SameOrgPeer,
 }
+
+type KnownPeersMap = HashMap<PeerId, KnownPeerAddresses>;
 
 #[derive(Default)]
 pub struct PeerControl {
-    last_peer_requests: HashMap<PeerId, VecDeque<PeerStreamingRequest>>,
-    blacklisted: HashMap<PeerId, instant::Instant>,
+    pub last_peer_requests: HashMap<PeerId, VecDeque<PeerStreamingRequest>>,
+    pub blacklisted: HashMap<PeerId, instant::Instant>,
+    pub other_orgs_peers: HashMap<GaltOrganization, KnownPeersMap>,
+    pub our_org_peers: KnownPeersMap,
+    pub peer_statistics: HashMap<PeerId, PeerStatistics>,
+    // TODO: create statistics for orgs (upload/download/payments)
 }
 
 impl PeerControl {
@@ -58,6 +86,9 @@ impl PeerControl {
         peer: &PeerId,
         request: StreamingRequest,
     ) -> FloodControlResult {
+        if self.our_org_peers.contains_key(peer) {
+            return FloodControlResult::SameOrgPeer;
+        }
         let now = instant::Instant::now();
         if self.expire_blacklist(peer, now) {
             log::debug!("{peer} still in blacklist");
@@ -103,16 +134,43 @@ impl PeerControl {
         FloodControlResult::Good
     }
 
-    pub(crate) fn may_get_from(&mut self, peer: &PeerId) -> bool {
+    pub(crate) fn may_get_from(&mut self, peer: &PeerId, streaming_key: &StreamingKey) -> bool {
         let now = instant::Instant::now();
-        !self.expire_blacklist(peer, now) && {
+        let allowed = !self.expire_blacklist(peer, now) && {
             let requests = self.last_peer_requests.get(peer);
             match requests {
                 None => true,
-                Some(requests) => !requests
-                    .iter()
-                    .any(|r| now.duration_since(r.time) < Self::PROVIDE_FOR_PERIOD_OF_INTEREST),
+                Some(requests) => !requests.iter().any(|r| {
+                    now.duration_since(r.time) < Self::PROVIDE_FOR_PERIOD_OF_INTEREST
+                        && r.request.streaming_key == *streaming_key
+                }),
             }
-        }
+        };
+
+        allowed
+    }
+
+    pub(crate) fn add_our_org_peer(&mut self, k: KnownPeer) {
+        self.our_org_peers.insert(k.peer, k.listen_addresses);
+    }
+
+    pub(crate) fn add_org_peers(&mut self, known_peers: &[KnownPeer], org: GaltOrganization) {
+        self.other_orgs_peers.entry(org).or_default().extend(
+            known_peers
+                .iter()
+                .map(|k| (k.peer, k.listen_addresses.to_owned())),
+        );
+    }
+
+    pub(crate) fn add_ping_info(&mut self, p: PeerId, rtt: Option<Duration>) {
+        self.peer_statistics.entry(p).or_default().latency = rtt;
+    }
+
+    pub(crate) fn add_identify_info(&mut self, p: PeerId, info: IdentifyInfo) {
+        self.peer_statistics.entry(p).or_default().identify_info = Some(info);
+    }
+
+    pub(crate) fn add_peer_org(&mut self, p: PeerId, org: GaltOrganization) {
+        self.peer_statistics.entry(p).or_default().org = Some(org);
     }
 }

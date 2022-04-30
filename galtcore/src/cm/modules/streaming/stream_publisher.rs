@@ -11,21 +11,20 @@ use log::debug;
 use tokio::sync::mpsc::{self};
 use tokio::sync::oneshot;
 
-use crate::daemons::cm::SharedGlobalState;
+use crate::cm::SharedGlobalState;
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::kademlia_record::{KademliaRecord, StreamingRecord};
 use crate::protocols::media_streaming::{
-    self, RTMPFrameType, SignedStreamingData, StreamSeekType, StreamingDataType, StreamingKey,
-    StreamingResponse, StreamingResponseResult,
+    self, RTMPFrameType, StreamSeekType, StreamingDataType, StreamingKey, StreamingResponse,
+    StreamingResponseResult, VerifiedSignedStreamingData,
 };
 use crate::{protocols, utils};
 
 type SenderStreamingData = mpsc::Sender<StreamingDataClientCommand>;
 
-#[derive(Debug)]
 enum StreamingDataClientCommand {
     NewStreamingData {
-        data: Vec<SignedStreamingData>,
+        data: Vec<VerifiedSignedStreamingData>,
         sender: oneshot::Sender<anyhow::Result<()>>,
     },
     GetStreamingData {
@@ -47,11 +46,12 @@ pub struct StreamPublisherClient {
 }
 
 impl StreamPublisherClient {
-    pub async fn feed_data(&self, data: Vec<SignedStreamingData>) -> anyhow::Result<()> {
+    pub async fn feed_data(&self, data: Vec<VerifiedSignedStreamingData>) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(StreamingDataClientCommand::NewStreamingData { data, sender })
-            .await?;
+            .await
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         receiver.await?
     }
@@ -68,7 +68,8 @@ impl StreamPublisherClient {
                 seek_type,
                 sender,
             })
-            .await?;
+            .await
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -77,7 +78,8 @@ impl StreamPublisherClient {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(StreamingDataClientCommand::GetLastSent { sender })
-            .await?;
+            .await
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -86,7 +88,8 @@ impl StreamPublisherClient {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(StreamingDataClientCommand::Die { sender })
-            .await?;
+            .await
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -102,12 +105,12 @@ async fn _stream_publisher_daemon(
     // Note: responses here are saved in the "reverse order" compare to other lists in other places
     // This means that the left/head is the newest data and the right/tail is the oldest
     // We do that to enable truncate to remove old items from the right/tail end
-    let mut video_header: Option<Arc<SignedStreamingData>> = None;
-    let mut audio_header: Option<Arc<SignedStreamingData>> = None;
-    let mut last_video_keyframe: Option<Arc<SignedStreamingData>> = None;
-    let mut last_video: Option<Arc<SignedStreamingData>> = None;
-    let mut last_audio: Option<Arc<SignedStreamingData>> = None;
-    let mut consumers: HashMap<PeerId, VecDeque<Arc<SignedStreamingData>>> = HashMap::new();
+    let mut video_header: Option<Arc<VerifiedSignedStreamingData>> = None;
+    let mut audio_header: Option<Arc<VerifiedSignedStreamingData>> = None;
+    let mut last_video_keyframe: Option<Arc<VerifiedSignedStreamingData>> = None;
+    let mut last_video: Option<Arc<VerifiedSignedStreamingData>> = None;
+    let mut last_audio: Option<Arc<VerifiedSignedStreamingData>> = None;
+    let mut consumers: HashMap<PeerId, VecDeque<Arc<VerifiedSignedStreamingData>>> = HashMap::new();
 
     let mut last_sent = instant::Instant::now();
     let mut published = false;
@@ -127,9 +130,11 @@ async fn _stream_publisher_daemon(
                 let mut failure_processing_responses = false;
                 let new_responses = data
                     .into_iter()
-                    .map(|r| match r.streaming_data.data_type {
+                    .map(|r| match r.signed_streaming_data.streaming_data.data_type {
                         StreamingDataType::RtmpAudio(_) | StreamingDataType::RtmpVideo(_) => {
-                            let frame_type = RTMPFrameType::classify(&r.streaming_data.data);
+                            let frame_type = RTMPFrameType::classify(
+                                &r.signed_streaming_data.streaming_data.data,
+                            );
                             let r = Arc::new(r);
                             match frame_type {
                                 RTMPFrameType::VideoSequenceHeader => {
@@ -225,7 +230,7 @@ async fn _stream_publisher_daemon(
                 ]
                 .into_iter()
                 .flatten()
-                .map(|r| r.as_ref().clone())
+                .map(|r| r.signed_streaming_data.clone())
                 .sorted_by_key(|r| r.streaming_data.source_offset)
                 .collect_vec();
                 log::info!(
@@ -260,11 +265,11 @@ async fn _stream_publisher_daemon(
                     &last_audio,
                 ];
                 let peer_responses = consumers.entry(peer).or_insert_with(|| {
-                    let new_responses: VecDeque<Arc<SignedStreamingData>> = base_data
+                    let new_responses: VecDeque<Arc<VerifiedSignedStreamingData>> = base_data
                         .into_iter()
                         .flatten()
                         .cloned()
-                        .sorted_by_key(|r| r.streaming_data.source_offset)
+                        .sorted_by_key(|r| r.signed_streaming_data.streaming_data.source_offset)
                         .collect();
                     log::info!(
                         "Initializing {} responses for {} StreamSeekType::Offset({n:?})",
@@ -275,7 +280,7 @@ async fn _stream_publisher_daemon(
                 });
                 // remove old data
                 while let Some(p) = peer_responses.pop_front() {
-                    if p.streaming_data.source_offset > n {
+                    if p.signed_streaming_data.streaming_data.source_offset > n {
                         peer_responses.push_front(p); // this is new data, put back on responses
                         break;
                     }
@@ -283,8 +288,8 @@ async fn _stream_publisher_daemon(
                 // get new data
                 let to_send = peer_responses
                     .iter_mut()
-                    .filter(|r| r.streaming_data.source_offset > n)
-                    .map(|r| r.as_ref().clone())
+                    .filter(|r| r.signed_streaming_data.streaming_data.source_offset > n)
+                    .map(|r| r.signed_streaming_data.clone())
                     .take(media_streaming::MAX_RESPONSES_PER_REQUEST)
                     .collect_vec();
                 if !to_send.is_empty() {
@@ -314,9 +319,12 @@ async fn _stream_publisher_daemon(
                 ]
                 .into_iter()
                 .flatten()
-                .max_by_key(|r| r.streaming_data.source_offset)
+                .max_by_key(|r| r.signed_streaming_data.streaming_data.source_offset)
                 .map(|r| r.as_ref().clone());
-                let to_send = most_recent_frame.into_iter().collect_vec();
+                let to_send = most_recent_frame
+                    .into_iter()
+                    .map(|d| d.to_peek_result()) // peek is just the hash as data
+                    .collect_vec();
                 log::debug!("StreamingDataClientCommand::GetStreamingData seek_type: StreamSeekType::Peek returning {} responses", to_send.len());
                 if sender.send(Ok(StreamingResponse::Data(to_send))).is_err() {
                     log::warn!("Requester of {:?} for peer {} died,", streaming_key, peer);

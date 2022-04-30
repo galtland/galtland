@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use galtcore::cm::SharedGlobalState;
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::libp2p::futures::StreamExt;
@@ -57,13 +58,9 @@ async fn start_command(
         None => db.get_or_create_org_keypair().await?,
     };
     let keypair = identity::Keypair::generate_ed25519();
-    let my_peer_id = keypair.public().to_peer_id();
-    info!("My public peer id is {}", my_peer_id);
-    let identity = protocols::NodeIdentity {
-        keypair: keypair.clone(),
-        peer_id: my_peer_id,
-        org_keypair,
-    };
+    let identity = protocols::NodeIdentity::new(keypair, org_keypair)?;
+    info!("My public peer id is {}", identity.peer_id);
+    info!("{:?}", identity.org);
 
     let mut rendezvous_addresses: HashSet<Multiaddr> =
         opt.rendezvous_addresses.into_iter().collect();
@@ -87,10 +84,10 @@ async fn start_command(
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, webrtc_signaling_receiver) = mpsc::unbounded_channel();
     let (delegated_streaming_sender, delegated_streaming_receiver) = mpsc::unbounded_channel();
-    let transport = nativecommon::transport::our_transport(&keypair).await?;
+    let transport = nativecommon::transport::our_transport(identity.keypair.as_ref()).await?;
     let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
         configuration.clone(),
-        keypair,
+        identity.clone(),
         event_sender,
         broadcast_event_sender,
         webrtc_signaling_sender,
@@ -100,17 +97,17 @@ async fn start_command(
     .await;
 
     let (network_backend_command_sender, mut network_backend_command_receiver) = mpsc::channel(10);
-    let (highlevel_command_sender, highlevel_command_receiver) = mpsc::channel(10);
 
     let networkbackendclient =
         networkbackendclient::NetworkBackendClient::new(network_backend_command_sender);
 
+    let shared_global_state = SharedGlobalState::new();
     utils::spawn_and_log_error(nativecommon::webrtc::WebRtc::webrtc_main_loop(
         webrtc_signaling_receiver,
         delegated_streaming_receiver,
-        networkbackendclient.clone(),
-        highlevel_command_sender.clone(),
         identity.clone(),
+        shared_global_state.clone(),
+        networkbackendclient.clone(),
     ));
 
     if !opt.no_listen {
@@ -150,7 +147,8 @@ async fn start_command(
         opt.rtmp_listen_address
             .unwrap_or_else(|| "127.0.0.1:1935".parse().unwrap()),
         identity.clone(),
-        highlevel_command_sender.clone(),
+        shared_global_state.clone(),
+        networkbackendclient.clone(),
     ));
 
     if !opt.disable_rendezvous_register && !opt.disable_rendezvous_discover {
@@ -169,22 +167,15 @@ async fn start_command(
         }
     }
 
-    utils::spawn_and_log_error(daemons::cm::run_loop(
-        configuration.clone(),
-        networkbackendclient.clone(),
-        highlevel_command_receiver,
-        identity.clone(),
-    ));
-
     let gossip_listener_client = GossipListenerClient::new(networkbackendclient.clone());
 
     utils::spawn_and_log_error({
         let api_address = api_listen_address.unwrap_or(DEFAULT_API_ADDRESS.parse()?);
         let service = service::Service {
-            commands: highlevel_command_sender.clone(),
             network: networkbackendclient.clone(),
             gossip_listener_client: gossip_listener_client.clone(),
-            identity,
+            identity: identity.clone(),
+            shared_global_state: shared_global_state.clone(),
         };
         log::info!("Starting service api on {api_address}");
         async move {
@@ -199,8 +190,11 @@ async fn start_command(
     utils::spawn_and_log_error(daemons::internal_network_events::run_loop(
         event_receiver,
         broadcast_event_receiver,
-        highlevel_command_sender.clone(),
         gossip_listener_client.clone(),
+        configuration.clone(),
+        identity.clone(),
+        shared_global_state.clone(),
+        networkbackendclient.clone(),
     ));
 
     let mut discover_tick = tokio::time::interval(Duration::from_secs(30));
@@ -215,7 +209,7 @@ async fn start_command(
                 Some(e) => protocols::handle_network_backend_command(e, &mut swarm)?,
                 None => todo!(),
             },
-            event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
+            event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &identity, &mut swarm)
         };
     }
 }
@@ -284,9 +278,9 @@ async fn network_command(
             match client.get_network_info(sm::GetNetworkInfoRequest {}).await {
                 Ok(r) => {
                     let r = r.into_inner();
-                    let peer_id = r.peer_id;
+                    let peer_id: PeerId = PeerId::from_bytes(&r.peer_id)?;
                     let info = r.info;
-                    println!("Peer id: {peer_id:?}\n\n{info}");
+                    println!("\n{peer_id:?}\n\n{info}");
                 }
                 Err(e) => {
                     eprintln!("{}", e)

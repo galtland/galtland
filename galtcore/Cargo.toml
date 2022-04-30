@@ -9,7 +9,7 @@ readme = "README.md"
 description = "The core functionalities of galtland"
 
 [dependencies]
-libp2p = { version = "0.43", features = [
+libp2p = { version = "0.44", features = [
     "dcutr",
     # "dns-tokio",
     "floodsub",
@@ -48,7 +48,6 @@ rand = "0.8.4"
 unsigned-varint = "0.7.1"
 byte-unit = "4.0.13"
 rayon = "1.5.1"
-pin-project-lite = "0.2.8"
 futures-util = "0.3.19"
 futures = "0.3.19"
 instant = "0.1.12"

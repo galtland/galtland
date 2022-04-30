@@ -9,26 +9,34 @@ use libp2p::PeerId;
 use tokio::sync::mpsc::{self};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::daemons::cm::SharedGlobalState;
+use crate::cm::modules::peer_control::PeerStatistics;
+use crate::cm::SharedGlobalState;
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::kademlia_record::StreamingRecord;
 use crate::protocols::media_streaming::{
     StreamOffset, StreamSeekType, StreamingKey, StreamingRequest, StreamingResponse,
 };
-use crate::protocols::{NodeIdentity, PeerStatistics};
+use crate::protocols::NodeIdentity;
 use crate::utils::{self, spawn_and_log_error, ArcMutex};
 
 pub(crate) fn launch_daemon(
     identity: NodeIdentity,
     shared_global_state: SharedGlobalState,
     network: NetworkBackendClient,
+    record: StreamingRecord,
     streaming_key: StreamingKey,
     // ) -> (tokio::task::JoinHandle<()>, PeerSeekerClient) {
 ) -> ((), PeerSeekerClient) {
     // TODO: perhaps receive internal network events
     let (sender, receiver) = mpsc::channel(2);
     let handle = spawn_and_log_error({
-        let peer_seeker = PeerSeeker::new(identity, shared_global_state, network, streaming_key);
+        let peer_seeker = PeerSeeker::new(
+            identity,
+            shared_global_state,
+            network,
+            record,
+            streaming_key,
+        );
         peer_seeker.run(receiver)
     });
     (handle, PeerSeekerClient { sender })
@@ -144,7 +152,7 @@ struct PeerSeeker {
     shared_global_state: SharedGlobalState,
     network: NetworkBackendClient,
     streaming_key: StreamingKey,
-    kad_key: Vec<u8>,
+    record: StreamingRecord,
     peer_shared_state: ArcMutex<PeersSharedState>,
 }
 
@@ -159,18 +167,15 @@ impl PeerSeeker {
         identity: NodeIdentity,
         shared_global_state: SharedGlobalState,
         network: NetworkBackendClient,
+        record: StreamingRecord,
         streaming_key: StreamingKey,
     ) -> Self {
-        let kad_key = StreamingRecord::streaming_kad_key(
-            &streaming_key.video_key,
-            &streaming_key.channel_key,
-        );
         Self {
             identity,
             shared_global_state,
             network,
             streaming_key,
-            kad_key,
+            record,
             peer_shared_state: Arc::new(Mutex::new(Default::default())),
         }
     }
@@ -263,7 +268,7 @@ impl PeerSeeker {
 
     fn peer_maintenance(&mut self) -> anyhow::Result<()> {
         spawn_and_log_error({
-            let network = self.network.clone();
+            let shared_global_state = self.shared_global_state.clone();
             let our_peer_id = self.identity.peer_id;
             {
                 let peer_shared_state = self.peer_shared_state.clone();
@@ -272,7 +277,12 @@ impl PeerSeeker {
                     log::debug!(
                         "peer_maintenance update current_peer_statistics for {streaming_key:?}"
                     );
-                    let peer_statistics = network.get_peer_statistics().await?;
+                    let peer_statistics = shared_global_state
+                        .peer_control
+                        .lock()
+                        .await
+                        .peer_statistics
+                        .clone();
                     let mut state = peer_shared_state.lock().await;
                     state.current_peer_statistics.clear();
                     state.current_peer_statistics.extend(peer_statistics);
@@ -284,12 +294,12 @@ impl PeerSeeker {
         spawn_and_log_error({
             let our_peer_id = self.identity.peer_id;
             let network = self.network.clone();
-            let kad_key = self.kad_key.clone();
+            let record = self.record.clone();
             let streaming_key = self.streaming_key.clone();
             let peer_shared_state = self.peer_shared_state.clone();
             let shared_global_state = self.shared_global_state.clone();
             async move {
-                match network.get_providers(kad_key).await {
+                match network.get_providers(record.key.clone()).await {
                     Ok(Ok(mut peers)) => {
                         peers.remove(&our_peer_id);
                         log::debug!(
@@ -303,9 +313,15 @@ impl PeerSeeker {
                             .min_by_key(|(_, stats)| stats.latency)
                         {
                             if peers.insert(*p) {
-                                log::debug!("Adding fastest {p} with {stats:?} to list of peers");
+                                log::debug!(
+                                    "Adding fastest {p} with latency {:?} to list of peers",
+                                    stats.latency
+                                );
                             } else {
-                                log::debug!("Fastest {p} with {stats:?} already on list of peers");
+                                log::debug!(
+                                    "Fastest {p} with latency {:?} already on list of peers",
+                                    stats.latency
+                                );
                             }
                         };
                         let now = instant::Instant::now();
@@ -333,10 +349,12 @@ impl PeerSeeker {
                                             let shared_global_state = shared_global_state.clone();
                                             let network = network.clone();
                                             let streaming_key = streaming_key.clone();
+                                            let record = record.clone();
                                             async move {
                                                 let r = Self::update_peer(
                                                     shared_global_state,
                                                     network,
+                                                    record,
                                                     streaming_key,
                                                     peer,
                                                 )
@@ -383,6 +401,7 @@ impl PeerSeeker {
     async fn update_peer(
         shared_global_state: SharedGlobalState,
         network: NetworkBackendClient,
+        record: StreamingRecord,
         streaming_key: StreamingKey,
         peer: PeerId,
     ) -> anyhow::Result<PeerState> {
@@ -390,7 +409,7 @@ impl PeerSeeker {
             .peer_control
             .lock()
             .await
-            .may_get_from(&peer)
+            .may_get_from(&peer, &streaming_key)
         {
             match network
                 .request_streaming_data(
@@ -404,9 +423,19 @@ impl PeerSeeker {
             {
                 Ok(Ok(StreamingResponse::Data(responses))) => match responses.first() {
                     Some(r) => {
-                        let offset = r.streaming_data.source_offset;
-                        log::debug!("Got StreamingResponse::Data peek with {offset:?} from {peer}");
-                        PeerState::Active(offset)
+                        if r.is_valid_peek(&record) {
+                            let offset = r.streaming_data.source_offset;
+                            log::debug!(
+                                "Got StreamingResponse::Data peek with {offset:?} from {peer}"
+                            );
+                            PeerState::Active(offset)
+                        } else {
+                            log::warn!("Got StreamingResponse::Data for peer {peer} with invalid peek signature, temporarily blacklisting...");
+                            PeerState::TemporarilyBlacklisted(
+                                instant::Instant::now()
+                                    + Self::BLACKLIST_DURATION_ON_RECOVERABLE_ERROR,
+                            )
+                        }
                     }
                     None => {
                         log::debug!(

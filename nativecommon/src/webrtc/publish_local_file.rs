@@ -1,9 +1,10 @@
 use anyhow::Context;
-use galtcore::daemons::cm::{self, ClientCommand};
+use galtcore::cm::{self, SharedGlobalState};
+use galtcore::networkbackendclient::NetworkBackendClient;
 use galtcore::protocols::kademlia_record::StreamingRecord;
 use galtcore::protocols::media_streaming::{
-    IntegerStreamTrack, SignedStreamingData, StreamMetadata, StreamOffset, StreamingData,
-    StreamingDataType, StreamingKey,
+    IntegerStreamTrack, StreamMetadata, StreamOffset, StreamingData, StreamingDataType,
+    StreamingKey, VerifiedSignedStreamingData,
 };
 use galtcore::protocols::NodeIdentity;
 use galtcore::utils;
@@ -16,6 +17,7 @@ use webrtc::media::io::ogg_reader::OggReader;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::rtp_transceiver::RTCPFeedback;
 
+
 const RTP_OUTBOUND_MTU: usize = 1200;
 const OGG_PAGE_DURATION: Duration = Duration::from_millis(20);
 
@@ -24,8 +26,9 @@ pub async fn publish(
     video_file: String,
     audio_file: String,
     streaming_key: StreamingKey,
-    commands: mpsc::Sender<ClientCommand>,
     identity: NodeIdentity,
+    shared_global_state: &SharedGlobalState,
+    network: &mut NetworkBackendClient,
 ) -> anyhow::Result<()> {
     let record = StreamingRecord::new(
         &identity.keypair,
@@ -123,7 +126,7 @@ pub async fn publish(
                 );
                 streaming_data_sender
                     .send(streaming_data)
-                    .context("receiver dropped sending video streaming data")?;
+                    .map_err(utils::send_error)?;
             }
             Ok::<(), anyhow::Error>(())
         }
@@ -188,7 +191,7 @@ pub async fn publish(
                 );
                 streaming_data_sender
                     .send(streaming_data)
-                    .context("receiver dropped sending audio streaming data")?;
+                    .map_err(utils::send_error)?;
                 Handle::current().block_on(ticker.tick());
             }
             Ok::<(), anyhow::Error>(())
@@ -196,15 +199,15 @@ pub async fn publish(
     });
 
     let (sender, receiver) = oneshot::channel();
-    commands
-        .send(ClientCommand::PublishStream(
-            cm::streaming::handlers::PublishStreamInfo {
-                record: record.clone(),
-                sender,
-            },
-        ))
-        .await
-        .map_err(utils::send_error)?;
+    cm::modules::streaming::handlers::publish(
+        shared_global_state,
+        network,
+        cm::modules::streaming::handlers::PublishStreamInfo {
+            record: record.clone(),
+            sender,
+        },
+    )
+    .await?;
 
     let publisher = receiver
         .await
@@ -218,7 +221,7 @@ pub async fn publish(
             let streaming_data = streaming_data
                 .into_iter()
                 .map(|mut s| {
-                    s.streaming_data.source_offset = StreamOffset {
+                    s.signed_streaming_data.streaming_data.source_offset = StreamOffset {
                         sequence_id,
                         timestamp_reference,
                     };
@@ -451,8 +454,9 @@ pub async fn publish3(
     _video_file: String,
     _audio_file: String,
     streaming_key: StreamingKey,
-    commands: mpsc::Sender<ClientCommand>,
     identity: NodeIdentity,
+    shared_global_state: &SharedGlobalState,
+    network: &mut NetworkBackendClient,
 ) -> anyhow::Result<()> {
     let record = StreamingRecord::new(
         &identity.keypair,
@@ -508,7 +512,7 @@ pub async fn publish3(
                     from_to_streaming_data(packets, &metadata, &stream_track, &identity, &record);
                 streaming_data_sender
                     .send(streaming_data)
-                    .context("receiver dropped sending video streaming data")?;
+                    .map_err(utils::send_error)?;
             }
             #[allow(unreachable_code)]
             Ok::<(), anyhow::Error>(())
@@ -546,7 +550,7 @@ pub async fn publish3(
                     from_to_streaming_data(packets, &metadata, &stream_track, &identity, &record);
                 streaming_data_sender
                     .send(streaming_data)
-                    .context("receiver dropped sending audio streaming data")?;
+                    .map_err(utils::send_error)?;
             }
             #[allow(unreachable_code)]
             Ok::<(), anyhow::Error>(())
@@ -555,15 +559,15 @@ pub async fn publish3(
 
 
     let (sender, receiver) = oneshot::channel();
-    commands
-        .send(ClientCommand::PublishStream(
-            cm::streaming::handlers::PublishStreamInfo {
-                record: record.clone(),
-                sender,
-            },
-        ))
-        .await
-        .map_err(utils::send_error)?;
+    cm::modules::streaming::handlers::publish(
+        shared_global_state,
+        network,
+        cm::modules::streaming::handlers::PublishStreamInfo {
+            record: record.clone(),
+            sender,
+        },
+    )
+    .await?;
 
     let publisher = receiver
         .await
@@ -577,7 +581,7 @@ pub async fn publish3(
             let streaming_data = streaming_data
                 .into_iter()
                 .map(|mut s| {
-                    s.streaming_data.source_offset = StreamOffset {
+                    s.signed_streaming_data.streaming_data.source_offset = StreamOffset {
                         sequence_id,
                         timestamp_reference,
                     };
@@ -602,11 +606,11 @@ fn from_to_streaming_data_packets(
     stream_track: &IntegerStreamTrack,
     identity: &NodeIdentity,
     record: &StreamingRecord,
-) -> Vec<SignedStreamingData> {
+) -> Vec<VerifiedSignedStreamingData> {
     packets
         .iter()
         .map(|data| {
-            SignedStreamingData::from(
+            VerifiedSignedStreamingData::from(
                 StreamingData {
                     data: serialize_packet(data)?,
                     source_offset: Default::default(), // will be properly filled latter
@@ -633,11 +637,11 @@ fn from_to_streaming_data(
     stream_track: &IntegerStreamTrack,
     identity: &NodeIdentity,
     record: &StreamingRecord,
-) -> Vec<SignedStreamingData> {
+) -> Vec<VerifiedSignedStreamingData> {
     packets
         .into_iter()
         .map(|data| {
-            SignedStreamingData::from(
+            VerifiedSignedStreamingData::from(
                 StreamingData {
                     data,
                     source_offset: Default::default(), // will be properly filled latter
@@ -672,7 +676,6 @@ fn serialize_packet(p: &webrtc::rtp::packet::Packet) -> Result<Vec<u8>, anyhow::
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-
 
     #[test]
     fn test_streaming() -> anyhow::Result<()> {

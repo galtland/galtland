@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use libp2p::kad::record::Key;
 use libp2p::request_response::ResponseChannel;
-use libp2p::swarm::NetworkInfo;
-use libp2p::{floodsub, PeerId};
+use libp2p::swarm::{DialError, NetworkInfo};
+use libp2p::{floodsub, Multiaddr, PeerId};
 use tokio::sync::{mpsc, oneshot};
 
 use super::protocols::kademlia_record::KademliaRecord;
 use crate::protocols::delegated_streaming::{
     DelegatedStreamingRequest, DelegatedStreamingResponseResult,
 };
+use crate::protocols::galt_identify::{GaltIdentifyRequest, GaltIdentifyResponseResult};
 use crate::protocols::media_streaming::{
     StreamingKey, StreamingRequest, StreamingResponseResult, WrappedStreamingResponseResult,
 };
@@ -20,9 +21,8 @@ use crate::protocols::simple_file_exchange::{SimpleFileRequest, SimpleFileRespon
 use crate::protocols::webrtc_signaling::{
     SignalingRequestOrResponse, WebRtcSignalingResponseResult,
 };
-use crate::protocols::PeerStatistics;
+use crate::utils;
 
-// #[derive(Debug)]
 pub enum NetworkBackendCommand {
     StartProvidingSimpleFile {
         key: Vec<u8>,
@@ -39,7 +39,7 @@ pub enum NetworkBackendCommand {
         sender: oneshot::Sender<()>,
     },
     GetProviders {
-        key: Vec<u8>,
+        key: Key,
         sender: oneshot::Sender<Result<HashSet<PeerId>, libp2p::kad::GetProvidersError>>,
     },
     GetRecord {
@@ -114,11 +114,24 @@ pub enum NetworkBackendCommand {
         response: DelegatedStreamingResponseResult,
         channel: ResponseChannel<DelegatedStreamingResponseResult>,
     },
-    GetPeerStatistics {
-        sender: oneshot::Sender<HashMap<PeerId, PeerStatistics>>,
+    RequestGaltIdentify {
+        request: GaltIdentifyRequest,
+        peer: PeerId,
+        sender: oneshot::Sender<
+            Result<GaltIdentifyResponseResult, libp2p::request_response::OutboundFailure>,
+        >,
+    },
+    RespondGaltIdentify {
+        response: GaltIdentifyResponseResult,
+        channel: ResponseChannel<GaltIdentifyResponseResult>,
     },
     GetSwarmNetworkInfo {
         sender: oneshot::Sender<NetworkInfo>,
+    },
+    Dial {
+        peer: PeerId,
+        addresses: Vec<Multiaddr>,
+        sender: oneshot::Sender<Result<(), DialError>>,
     },
 }
 
@@ -152,9 +165,7 @@ impl NetworkBackendClient {
                 sender,
             })
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("Channel closed while sending StartProvidingSimpleFile")
-            })?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -173,7 +184,7 @@ impl NetworkBackendClient {
                 sender,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending StartProvidingStreaming"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -184,7 +195,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::StopProviding { kad_key, sender })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending StopProviding"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         receiver.await?;
         Ok(())
@@ -192,14 +203,14 @@ impl NetworkBackendClient {
 
     pub async fn get_providers(
         &self,
-        key: Vec<u8>,
+        key: Key,
     ) -> anyhow::Result<Result<HashSet<PeerId>, libp2p::kad::GetProvidersError>> {
         log::debug!("get_providers {:?}", hex::encode(&key));
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(NetworkBackendCommand::GetProviders { key, sender })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending GetProviders"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -211,7 +222,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::GetPublishedFileName { key, sender })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending GetPublishedFileName"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -222,7 +233,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::GetRecord { key, sender })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending GetRecord"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         receiver.await?
     }
@@ -233,7 +244,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::PutRecord { record, sender })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending PutRecord"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         receiver.await?
     }
@@ -244,7 +255,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::RemoveRecord { kad_key, sender })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RemoveRecord"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         receiver.await?;
         Ok(())
@@ -267,7 +278,7 @@ impl NetworkBackendClient {
                 sender,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending PublishGossip"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -288,7 +299,7 @@ impl NetworkBackendClient {
                 sender,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RequestSimpleFile"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -302,7 +313,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::RespondSimpleFile { response, channel })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RespondSimpleFile"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -321,7 +332,7 @@ impl NetworkBackendClient {
                 sender,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RequestStreamingData"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -340,7 +351,7 @@ impl NetworkBackendClient {
                 channel,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RespondStreamingData"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -361,9 +372,7 @@ impl NetworkBackendClient {
                 sender,
             })
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("Channel closed while sending RequestDelegatedStreaming")
-            })?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -380,9 +389,41 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::RespondDelegatedStreaming { response, channel })
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("Channel closed while sending RespondDelegatedStreaming")
-            })?;
+            .map_err(utils::send_error)?;
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    pub async fn request_galt_identify(
+        &self,
+        request: GaltIdentifyRequest,
+        peer: PeerId,
+    ) -> anyhow::Result<Result<GaltIdentifyResponseResult, libp2p::request_response::OutboundFailure>>
+    {
+        log::debug!("request_galt_identify to peer {}", peer);
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(NetworkBackendCommand::RequestGaltIdentify {
+                request,
+                peer,
+                sender,
+            })
+            .await
+            .map_err(utils::send_error)?;
+        tokio::task::yield_now().await;
+        Ok(receiver.await?)
+    }
+
+    pub async fn respond_galt_identify(
+        &self,
+        response: GaltIdentifyResponseResult,
+        channel: ResponseChannel<GaltIdentifyResponseResult>,
+    ) -> anyhow::Result<()> {
+        log::debug!("respond_galt_identify with success? {}", response.is_ok());
+        self.sender
+            .send(NetworkBackendCommand::RespondGaltIdentify { response, channel })
+            .await
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -396,7 +437,7 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::RespondPaymentInfo { response, channel })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RespondPaymentInfo"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -417,7 +458,7 @@ impl NetworkBackendClient {
                 sender,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RequestWebRtcSignaling"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }
@@ -434,20 +475,9 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::RespondWebRtcSignaling { response, channel })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending RespondWebRtcSignaling"))?;
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(())
-    }
-
-    pub async fn get_peer_statistics(&self) -> anyhow::Result<HashMap<PeerId, PeerStatistics>> {
-        log::debug!("get_peer_statistics");
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(NetworkBackendCommand::GetPeerStatistics { sender })
-            .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending GetPeerStatistics"))?;
-        tokio::task::yield_now().await;
-        Ok(receiver.await?)
     }
 
     pub async fn get_swarm_network_info(&self) -> anyhow::Result<NetworkInfo> {
@@ -456,7 +486,26 @@ impl NetworkBackendClient {
         self.sender
             .send(NetworkBackendCommand::GetSwarmNetworkInfo { sender })
             .await
-            .map_err(|_| anyhow::anyhow!("Channel closed while sending GetSwarmNetworkInfo"))?;
+            .map_err(utils::send_error)?;
+        tokio::task::yield_now().await;
+        Ok(receiver.await?)
+    }
+
+    pub async fn dial(
+        &self,
+        peer: PeerId,
+        addresses: Vec<Multiaddr>,
+    ) -> anyhow::Result<Result<(), DialError>> {
+        log::debug!("dial {peer}");
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(NetworkBackendCommand::Dial {
+                peer,
+                addresses,
+                sender,
+            })
+            .await
+            .map_err(utils::send_error)?;
         tokio::task::yield_now().await;
         Ok(receiver.await?)
     }

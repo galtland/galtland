@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use galtcore::cm::SharedGlobalState;
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::tokio::sync::{broadcast, mpsc};
@@ -8,6 +9,7 @@ use galtcore::{daemons, networkbackendclient, protocols, tokio};
 use libp2p::futures::StreamExt;
 use libp2p::identity::{self};
 use libp2p::Multiaddr;
+use log::info;
 
 use crate::transport;
 
@@ -31,14 +33,8 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
     let keypair = identity::Keypair::generate_ed25519();
     let org_keypair = identity::Keypair::generate_ed25519();
 
-    let my_peer_id = keypair.public().to_peer_id();
-
-    log::info!("My public peer id is {}", my_peer_id);
-    let identity = protocols::NodeIdentity {
-        keypair: keypair.clone(),
-        peer_id: my_peer_id,
-        org_keypair,
-    };
+    let identity = protocols::NodeIdentity::new(keypair, org_keypair)?;
+    info!("My public peer id is {}", identity.peer_id);
 
     let rendezvous_addresses: HashSet<Multiaddr> = HashSet::new();
     // peer_seeds::get_official_rendezvous_ws()
@@ -54,12 +50,10 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
     };
     let (network_backend_command_sender, mut network_backend_command_receiver) = mpsc::channel(10);
 
-    let (highlevel_command_sender, highlevel_command_receiver) = mpsc::channel(10);
-
     let networkbackendclient =
         networkbackendclient::NetworkBackendClient::new(network_backend_command_sender);
 
-    let transport = transport::our_transport(&keypair).expect("to build protocol");
+    let transport = transport::our_transport(identity.keypair.as_ref()).expect("to build protocol");
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, webrtc_signaling_receiver) = mpsc::unbounded_channel();
@@ -70,7 +64,7 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
 
     let mut swarm = galtcore::swarm::build(
         configuration.clone(),
-        keypair,
+        identity.clone(),
         event_sender,
         broadcast_event_sender.clone(),
         webrtc_signaling_sender,
@@ -86,20 +80,18 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
         }
     }
 
-    galtcore::utils::spawn_and_log_error(daemons::cm::run_loop(
-        configuration.clone(),
-        networkbackendclient.clone(),
-        highlevel_command_receiver,
-        identity,
-    ));
+    let shared_global_state = SharedGlobalState::new();
 
     let gossip_listener_client = GossipListenerClient::new(networkbackendclient.clone());
 
     galtcore::utils::spawn_and_log_error(daemons::internal_network_events::run_loop(
         event_receiver,
         broadcast_event_receiver,
-        highlevel_command_sender.clone(),
         gossip_listener_client,
+        configuration.clone(),
+        identity.clone(),
+        shared_global_state,
+        networkbackendclient.clone(),
     ));
 
     match swarm.dial(delegated_streaming_endpoint.clone()) {
@@ -147,7 +139,7 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
                     Some(e) => protocols::handle_network_backend_command(e, &mut swarm).expect("to handle command"),
                     None => todo!(),
                 },
-                event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
+                event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &identity, &mut swarm)
             };
         }
     });

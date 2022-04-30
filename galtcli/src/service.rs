@@ -3,14 +3,14 @@
 use std::fmt::Write;
 use std::pin::Pin;
 
-use galtcore::daemons::cm::simple_file::{GetSimpleFileInfo, PublishSimpleFileInfo};
-use galtcore::daemons::cm::ClientCommand;
+use galtcore::cm::modules::simple_file::{GetSimpleFileInfo, PublishSimpleFileInfo};
+use galtcore::cm::{self, SharedGlobalState};
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::libp2p::futures::{self, StreamExt};
 use galtcore::networkbackendclient::NetworkBackendClient;
 use galtcore::protocols::media_streaming::StreamingKey;
 use galtcore::protocols::NodeIdentity;
-use galtcore::tokio::sync::{mpsc, oneshot};
+use galtcore::tokio::sync::oneshot;
 use galtcore::tokio_stream::wrappers::ReceiverStream;
 use galtcore::{tokio, utils};
 use log::info;
@@ -21,10 +21,10 @@ pub mod sm {
 }
 
 pub struct Service {
-    pub commands: mpsc::Sender<ClientCommand>,
     pub identity: NodeIdentity,
     pub gossip_listener_client: GossipListenerClient,
     pub network: NetworkBackendClient,
+    pub shared_global_state: SharedGlobalState,
 }
 
 type ServiceStream<T> = Pin<
@@ -41,20 +41,19 @@ impl sm::service_server::Service for Service {
     ) -> Result<Response<sm::AddSimpleFileResponse>, Status> {
         info!("add_simple_file: {:?}", request);
         let filename = request.into_inner().filename;
-        let commands = self.commands.clone();
+        let network = self.network.clone();
         let result: Result<Vec<u8>, String> = {
             tokio::spawn(async move {
                 let hash = utils::blake3_file_hash(&filename)
                     .await
                     .map_err(|e| format!("Calculating hash: {}", e))?;
                 let (sender, receiver) = oneshot::channel();
-                let command = ClientCommand::PublishSimpleFile(PublishSimpleFileInfo {
+                let info = PublishSimpleFileInfo {
                     filename,
                     hash: hash.clone(),
                     sender,
-                });
-                commands
-                    .send(command)
+                };
+                cm::modules::simple_file::handle_publish(network, info)
                     .await
                     .map_err(|e| format!("Publish file: {}", e))?;
                 let r = match receiver.await {
@@ -98,46 +97,36 @@ impl sm::service_server::Service for Service {
             }
         };
 
+        let network = self.network.clone();
         let (client_sender, client_receiver) = tokio::sync::mpsc::channel(10);
         tokio::spawn({
-            let commands = self.commands.clone();
             async move {
                 let (backend_sender, mut backend_receiver) = tokio::sync::mpsc::channel(10);
-                if commands
-                    .send(ClientCommand::GetSimpleFile(GetSimpleFileInfo {
+                cm::modules::simple_file::get(
+                    network,
+                    GetSimpleFileInfo {
                         hash,
                         sender: backend_sender,
-                    }))
-                    .await
-                    .is_err()
-                {
-                    anyhow::bail!("commands receiver died")
-                };
+                    },
+                )
+                .await?;
                 loop {
                     tokio::task::yield_now().await;
                     match backend_receiver.recv().await {
                         Some(Ok(Ok(r))) => {
                             let r: Result<sm::GetSimpleFileResponse, Status> =
                                 Ok(sm::GetSimpleFileResponse { data: r.data });
-                            if client_sender.send(r).await.is_err() {
-                                anyhow::bail!("receiver died")
-                            };
+                            client_sender.send(r).await.map_err(utils::send_error)?
                         }
-                        Some(Ok(Err(e))) => {
-                            if client_sender.send(Err(Status::internal(e))).await.is_err() {
-                                anyhow::bail!("receiver died")
-                            }
-                        }
-                        Some(Err(e)) => {
-                            if client_sender
-                                .send(Err(Status::internal(e.to_string())))
-                                .await
-                                .is_err()
-                            {
-                                anyhow::bail!("receiver died")
-                            }
-                        }
-                        None => return Ok(()),
+                        Some(Ok(Err(e))) => client_sender
+                            .send(Err(Status::internal(e)))
+                            .await
+                            .map_err(utils::send_error)?,
+                        Some(Err(e)) => client_sender
+                            .send(Err(Status::internal(e.to_string())))
+                            .await
+                            .map_err(utils::send_error)?,
+                        None => return Ok::<(), anyhow::Error>(()),
                     }
                 }
             }
@@ -167,22 +156,73 @@ impl sm::service_server::Service for Service {
         let swarm_info = network.get_swarm_network_info().await;
         let gossip_info = self.gossip_listener_client.get_streaming_records().await;
         let peer_id = self.identity.peer_id;
-        log::info!(
-            "peer id: {:?} {:?}",
-            peer_id.to_bytes(),
-            peer_id.to_base58()
-        );
+        let org = &self.identity.org;
+
+        let (blacklisted, last_peer_requests, our_org_peers, other_orgs_peers, peer_statistics) = {
+            let p = self.shared_global_state.peer_control.lock().await;
+            (
+                p.blacklisted.clone(),
+                p.last_peer_requests.clone(),
+                p.our_org_peers.clone(),
+                p.other_orgs_peers.clone(),
+                p.peer_statistics.clone(),
+            )
+        };
+
         let format_output = || -> anyhow::Result<String> {
             let mut s = String::new();
+            writeln!(s, "{org:?}\n")?;
             writeln!(s, "\n{:?}\n", swarm_info)?;
             if gossip_info.is_empty() {
-                writeln!(s, "\nEmpty Records\n")?;
+                writeln!(s, "\nNo records gathered so far\n")?;
             } else {
                 writeln!(s, "\nKnown Records:\n")?;
                 for i in gossip_info {
-                    writeln!(s, "{}", i.streaming_key)?;
+                    writeln!(s, "\t{}", i.streaming_key)?;
                 }
             }
+            writeln!(s, "\nPeer control info\n")?;
+
+            if !our_org_peers.is_empty() {
+                writeln!(s, "\tOur peers:")?;
+                for (p, addresses) in our_org_peers {
+                    writeln!(s, "\t\t- {p:?}: {} addresses", addresses.len())?;
+                }
+            }
+
+            if other_orgs_peers.iter().any(|(_, m)| !m.is_empty()) {
+                writeln!(s, "\tOther organizations peers:")?;
+                for (other_org, peer_map) in other_orgs_peers {
+                    if !peer_map.is_empty() {
+                        writeln!(s, "\t\t{:?}:", other_org)?;
+                        for (p, addresses) in peer_map {
+                            writeln!(s, "\t\t\t- {p:?}: {} addresses", addresses.len())?;
+                        }
+                    }
+                }
+            }
+
+            if !blacklisted.is_empty() {
+                writeln!(s, "\tBlacklisted:")?;
+                for (p, instant) in blacklisted {
+                    writeln!(s, "\t\t{p:?}: {instant:?}")?;
+                }
+            }
+
+            if !last_peer_requests.is_empty() {
+                writeln!(s, "\tLast peer requests:")?;
+                for (p, requests) in last_peer_requests {
+                    writeln!(s, "\t\t- {p:?}: {} requests", requests.len())?;
+                }
+            }
+
+            if !peer_statistics.is_empty() {
+                writeln!(s, "\tPeer statistics:")?;
+                for (p, stats) in peer_statistics {
+                    writeln!(s, "\t\t- {p:?}: {stats}")?;
+                }
+            }
+
             Ok(s)
         };
         match format_output() {
@@ -204,8 +244,9 @@ impl sm::service_server::Service for Service {
         let audio_file = r.audio_file;
         let video_stream_key = r.video_stream_key;
 
-        let commands = self.commands.clone();
         let identity = self.identity.clone();
+        let shared_global_state = &self.shared_global_state;
+        let mut network = self.network.clone();
 
         let streaming_key = StreamingKey {
             video_key: video_stream_key,
@@ -216,8 +257,9 @@ impl sm::service_server::Service for Service {
             video_file,
             audio_file,
             streaming_key,
-            commands,
             identity,
+            shared_global_state,
+            &mut network,
         )
         .await;
 

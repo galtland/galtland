@@ -4,23 +4,29 @@ use std::time::Duration;
 
 use anyhow::Context;
 use libp2p::floodsub::FloodsubMessage;
+use libp2p::identify::IdentifyInfo;
 // use libp2p::gossipsub::GossipsubMessage;
 use libp2p::request_response::ResponseChannel;
 use libp2p::{Multiaddr, PeerId};
 use tokio::sync::broadcast;
-use tokio::sync::mpsc::{Sender, UnboundedReceiver};
+use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::cm::simple_file::RespondSimpleFileInfo;
-use super::cm::streaming::handlers::{RespondPaymentInfo, RespondStreamingInfo};
-use super::cm::{ClientCommand, SentStreamingResponseStats};
 use super::gossip_listener::GossipListenerClient;
+use crate::cm::modules::payment_info::RespondPaymentInfo;
+use crate::cm::modules::simple_file::RespondSimpleFileInfo;
+use crate::cm::modules::streaming::handlers::RespondStreamingInfo;
+use crate::cm::{self, SentStreamingResponseStats, SharedGlobalState};
+use crate::configuration::Configuration;
+use crate::networkbackendclient::NetworkBackendClient;
+use crate::protocols::galt_identify::{GaltIdentifyRequest, GaltIdentifyResponseResult};
 use crate::protocols::kademlia_record::KademliaRecord;
 use crate::protocols::media_streaming::{StreamingRequest, WrappedStreamingResponseResult};
 use crate::protocols::payment_info::{PaymentInfoRequest, PaymentInfoResponseResult};
 use crate::protocols::simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
+use crate::protocols::NodeIdentity;
+use crate::utils;
 
 
-#[derive(Debug)]
 pub enum InternalNetworkEvent {
     InboundFileRequest {
         peer: PeerId,
@@ -37,6 +43,11 @@ pub enum InternalNetworkEvent {
         peer: PeerId,
         request: PaymentInfoRequest,
         channel: ResponseChannel<PaymentInfoResponseResult>,
+    },
+    GaltIdentifyRequest {
+        peer: PeerId,
+        request: GaltIdentifyRequest,
+        channel: ResponseChannel<GaltIdentifyResponseResult>,
     },
 }
 
@@ -61,31 +72,44 @@ pub enum BroadcastableNetworkEvent {
         peer: PeerId,
         endpoint: Multiaddr,
     },
+    PingInfo {
+        peer: PeerId,
+        rtt: Option<Duration>,
+    },
+    IdentifyInfo {
+        peer: PeerId,
+        info: IdentifyInfo,
+    },
 }
 
 pub async fn run_loop(
     mut event_receiver: UnboundedReceiver<InternalNetworkEvent>,
     mut broadcast_receiver: broadcast::Receiver<BroadcastableNetworkEvent>,
-    client_command_sender: Sender<ClientCommand>,
     gossip_listener_client: GossipListenerClient,
+    opt: Configuration,
+    identity: NodeIdentity,
+    shared_global_state: SharedGlobalState,
+    network: NetworkBackendClient,
 ) -> anyhow::Result<()> {
     loop {
         // TODO: consider dropping events if we can't handle everything
         tokio::task::yield_now().await;
         tokio::select! {
             event = event_receiver.recv() => {
-                handle_internal_network_event(&client_command_sender, event.context("loop finished")?).await?
+                utils::spawn_and_log_error(handle_internal_network_event(opt.clone(), identity.clone(), shared_global_state.clone(), network.clone(), event.context("loop finished")?))
             },
             event = broadcast_receiver.recv() => {
-                handle_broadcast_network_event(&client_command_sender, &gossip_listener_client, event.context("loop finished")?).await?
+                utils::spawn_and_log_error(handle_broadcast_network_event(gossip_listener_client.clone(), identity.clone(), shared_global_state.clone(), network.clone(), event.context("loop finished")?))
             }
         };
     }
 }
 
 async fn handle_broadcast_network_event(
-    client_command_sender: &Sender<ClientCommand>,
-    gossip_listener_client: &GossipListenerClient,
+    gossip_listener_client: GossipListenerClient,
+    identity: NodeIdentity,
+    shared_global_state: SharedGlobalState,
+    network: NetworkBackendClient,
     event: BroadcastableNetworkEvent,
 ) -> anyhow::Result<()> {
     match event {
@@ -96,21 +120,14 @@ async fn handle_broadcast_network_event(
             write_duration,
             responses_count,
         } => {
-            if client_command_sender
-                .send(ClientCommand::FeedSentStreamingResponseStats(
-                    SentStreamingResponseStats {
-                        peer,
-                        now,
-                        written_bytes,
-                        write_duration,
-                        responses_count,
-                    },
-                ))
-                .await
-                .is_err()
-            {
-                anyhow::bail!("receiver died")
-            }
+            let info = SentStreamingResponseStats {
+                peer,
+                now,
+                written_bytes,
+                write_duration,
+                responses_count,
+            };
+            cm::feed_streaming_response_stats(shared_global_state, info).await;
         }
         BroadcastableNetworkEvent::ReceivedGossip { message } => {
             gossip_listener_client.whisper(message).await
@@ -120,13 +137,38 @@ async fn handle_broadcast_network_event(
                 gossip_listener_client.notify_streaming_record(r).await;
             }
         }
-        BroadcastableNetworkEvent::ConnectionEstablished { .. } => {}
+        BroadcastableNetworkEvent::ConnectionEstablished { peer, .. } => {
+            cm::modules::galt_identify::handle_establish_with_peer(
+                &identity,
+                shared_global_state,
+                network,
+                peer,
+            )
+            .await?;
+        }
+        BroadcastableNetworkEvent::PingInfo { peer, rtt } => {
+            shared_global_state
+                .peer_control
+                .lock()
+                .await
+                .add_ping_info(peer, rtt);
+        }
+        BroadcastableNetworkEvent::IdentifyInfo { peer, info } => {
+            shared_global_state
+                .peer_control
+                .lock()
+                .await
+                .add_identify_info(peer, info);
+        }
     };
     Ok(())
 }
 
 async fn handle_internal_network_event(
-    client_command_sender: &Sender<ClientCommand>,
+    opt: Configuration,
+    identity: NodeIdentity,
+    shared_state_global: SharedGlobalState,
+    network: NetworkBackendClient,
     event: InternalNetworkEvent,
 ) -> anyhow::Result<()> {
     match event {
@@ -136,56 +178,62 @@ async fn handle_internal_network_event(
             filename,
             channel,
         } => {
-            if client_command_sender
-                .send(ClientCommand::RespondSimpleFile(RespondSimpleFileInfo {
-                    peer,
-                    request,
-                    filename,
-                    channel,
-                }))
-                .await
-                .is_err()
-            {
-                anyhow::bail!("receiver died")
-            }
+            let info = RespondSimpleFileInfo {
+                peer,
+                request,
+                filename,
+                channel,
+            };
+            cm::modules::simple_file::handle_respond(shared_state_global, network, info).await?;
         }
         InternalNetworkEvent::InboundStreamingDataRequest {
             peer,
             request,
             channel,
         } => {
-            if client_command_sender
-                .send(ClientCommand::RespondStreamingRequest(
-                    RespondStreamingInfo {
-                        peer,
-                        request,
-                        channel,
-                    },
-                ))
-                .await
-                .is_err()
-            {
-                anyhow::bail!("receiver died")
-            }
+            let info = RespondStreamingInfo {
+                peer,
+                request,
+                channel,
+            };
+            cm::modules::streaming::handlers::respond(
+                opt,
+                identity,
+                shared_state_global,
+                network,
+                info,
+            )
+            .await?;
         }
         InternalNetworkEvent::InboundPaymentInfoRequest {
             peer,
             request,
             channel,
         } => {
-            if client_command_sender
-                .send(ClientCommand::RespondPaymentInfoRequest(
-                    RespondPaymentInfo {
-                        peer,
-                        request,
-                        channel,
-                    },
-                ))
-                .await
-                .is_err()
-            {
-                anyhow::bail!("receiver died")
-            }
+            let info = RespondPaymentInfo {
+                peer,
+                request,
+                channel,
+            };
+            cm::modules::payment_info::handle_respond(network, info).await?
+        }
+        InternalNetworkEvent::GaltIdentifyRequest {
+            peer,
+            request,
+            channel,
+        } => {
+            let request = crate::protocols::galt_identify::RequestEvent {
+                peer,
+                request,
+                channel,
+            };
+            cm::modules::galt_identify::handle_respond(
+                &identity,
+                shared_state_global,
+                network,
+                request,
+            )
+            .await?
         }
     };
     Ok(())

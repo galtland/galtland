@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use anyhow::Context;
+use galtcore::cm::SharedGlobalState;
 use galtcore::configuration::Configuration;
 use galtcore::daemons::gossip_listener::GossipListenerClient;
 use galtcore::daemons::{self};
@@ -33,13 +34,8 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
         None => db.get_or_create_org_keypair().await?,
     };
     let keypair = identity::Keypair::generate_ed25519();
-    let my_peer_id = keypair.public().to_peer_id();
-    info!("My public peer id is {}", my_peer_id);
-    let identity = protocols::NodeIdentity {
-        keypair: keypair.clone(),
-        peer_id: my_peer_id,
-        org_keypair,
-    };
+    let identity = protocols::NodeIdentity::new(keypair, org_keypair)?;
+    info!("My public peer id is {}", identity.peer_id);
 
     let mut rendezvous_addresses: HashSet<Multiaddr> =
         opt.rendezvous_addresses.into_iter().collect();
@@ -63,10 +59,10 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, _webrtc_signaling_receiver) = mpsc::unbounded_channel();
     let (delegated_streaming_sender, _delegated_streaming_receiver) = mpsc::unbounded_channel();
-    let transport = nativecommon::transport::our_transport(&keypair).await?;
+    let transport = nativecommon::transport::our_transport(identity.keypair.as_ref()).await?;
     let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
         configuration.clone(),
-        keypair,
+        identity.clone(),
         event_sender,
         broadcast_event_sender,
         webrtc_signaling_sender,
@@ -76,8 +72,6 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
     .await;
 
     let (network_backend_command_sender, mut network_backend_command_receiver) = mpsc::channel(10);
-
-    let (highlevel_command_sender, highlevel_command_receiver) = mpsc::channel(10);
 
     let networkbackendclient =
         networkbackendclient::NetworkBackendClient::new(network_backend_command_sender);
@@ -122,21 +116,18 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
             Err(e) => warn!("Failed to dial {}: {}", address, e),
         }
     }
+    let shared_global_state = SharedGlobalState::new();
 
-    utils::spawn_and_log_error(daemons::cm::run_loop(
-        configuration.clone(),
-        networkbackendclient.clone(),
-        highlevel_command_receiver,
-        identity,
-    ));
-
-    let gossip_listener_client = GossipListenerClient::new(networkbackendclient);
+    let gossip_listener_client = GossipListenerClient::new(networkbackendclient.clone());
 
     utils::spawn_and_log_error(daemons::internal_network_events::run_loop(
         event_receiver,
         broadcast_event_receiver,
-        highlevel_command_sender,
         gossip_listener_client,
+        configuration.clone(),
+        identity.clone(),
+        shared_global_state,
+        networkbackendclient,
     ));
 
     utils::spawn_and_log_error({
@@ -153,7 +144,7 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
                         Some(e) => protocols::handle_network_backend_command(e, &mut swarm)?,
                         None => todo!(),
                     },
-                    event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
+                    event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &identity, &mut swarm)
                 };
             }
         }

@@ -13,13 +13,12 @@ use tokio::io::{AsyncReadExt, BufReader};
 use tokio::sync::mpsc::{self};
 use tokio::sync::{oneshot, Mutex};
 
-use super::SharedGlobalState;
+use crate::cm::SharedGlobalState;
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::kademlia_record::KademliaRecord;
 use crate::protocols::simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
 use crate::utils;
 
-#[derive(Debug)]
 pub struct RespondSimpleFileInfo {
     pub peer: PeerId,
     pub request: SimpleFileRequest,
@@ -27,14 +26,12 @@ pub struct RespondSimpleFileInfo {
     pub channel: ResponseChannel<Result<SimpleFileResponse, String>>,
 }
 
-#[derive(Debug)]
 pub struct PublishSimpleFileInfo {
     pub filename: String,
     pub hash: Vec<u8>,
     pub sender: oneshot::Sender<Result<(), String>>,
 }
 
-#[derive(Debug)]
 pub struct GetSimpleFileInfo {
     pub hash: Vec<u8>,
     pub sender: tokio::sync::mpsc::Sender<
@@ -43,14 +40,11 @@ pub struct GetSimpleFileInfo {
 }
 
 //FIXME: too many error being converted to string in this function
-pub(crate) async fn handle_get(
-    network: NetworkBackendClient,
-    info: GetSimpleFileInfo,
-) -> anyhow::Result<()> {
+pub async fn get(network: NetworkBackendClient, info: GetSimpleFileInfo) -> anyhow::Result<()> {
     let GetSimpleFileInfo { hash, sender } = info;
     debug!("handle_get {:?}", hash);
 
-    let peers = match network.clone().get_providers(hash.clone()).await {
+    let peers = match network.clone().get_providers(hash.clone().into()).await {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             sender
@@ -120,7 +114,7 @@ pub(crate) async fn handle_get(
     }
 }
 
-pub(crate) async fn handle_publish(
+pub async fn handle_publish(
     network: NetworkBackendClient,
     info: PublishSimpleFileInfo,
 ) -> anyhow::Result<()> {
@@ -156,13 +150,12 @@ pub(crate) async fn handle_publish(
     };
     log::debug!("publish result {:?}", result);
 
-    if sender.send(result).is_err() {
-        anyhow::bail!("Failed to send result")
-    }
+    sender.send(result).map_err(utils::send_error)?;
     Ok(())
 }
 
-pub(crate) async fn handle_respond(
+
+pub async fn handle_respond(
     shared_state: SharedGlobalState,
     network: NetworkBackendClient,
     info: RespondSimpleFileInfo,

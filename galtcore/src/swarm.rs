@@ -4,7 +4,6 @@ use std::time::Duration;
 
 // use libp2p::gossipsub::{self, MessageAuthenticity, ValidationMode};
 use libp2p::identify::{Identify, IdentifyConfig};
-use libp2p::identity::{self};
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::{Kademlia, KademliaConfig, KademliaStoreInserts};
 use libp2p::relay::v2::relay;
@@ -18,18 +17,19 @@ use crate::daemons::internal_network_events::{BroadcastableNetworkEvent, Interna
 use crate::protocols::delegated_streaming::{
     self, DelegatedStreamingCodec, DelegatedStreamingProtocol,
 };
+use crate::protocols::galt_identify::{GaltIdentifyCodec, GaltIdentifyProtocol};
 use crate::protocols::media_streaming::{StreamingCodec, StreamingProtocol};
 use crate::protocols::payment_info::{PaymentInfoCodec, PaymentInfoProtocol};
 use crate::protocols::simple_file_exchange::{SimpleFileExchangeCodec, SimpleFileExchangeProtocol};
 use crate::protocols::webrtc_signaling::{WebRtcSignalingCodec, WebRtcSignalingProtocol};
-use crate::protocols::{self, webrtc_signaling, ComposedBehaviour};
+use crate::protocols::{self, webrtc_signaling, ComposedBehaviour, NodeIdentity};
 use crate::utils;
 
 type OurTransport = libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>;
 
 pub async fn build(
     configuration: Configuration,
-    keypair: identity::Keypair,
+    identity: NodeIdentity,
     event_sender: tokio::sync::mpsc::UnboundedSender<InternalNetworkEvent>,
     broadcast_event_sender: tokio::sync::broadcast::Sender<BroadcastableNetworkEvent>,
     webrtc_signaling_sender: tokio::sync::mpsc::UnboundedSender<webrtc_signaling::RequestEvent>,
@@ -38,7 +38,7 @@ pub async fn build(
     >,
     transport: OurTransport,
 ) -> Swarm<ComposedBehaviour> {
-    let my_peer_id = keypair.public().to_peer_id();
+    let my_peer_id = identity.peer_id;
 
     let rr_cfg = {
         let mut c = RequestResponseConfig::default();
@@ -103,6 +103,11 @@ pub async fn build(
                 std::iter::once((DelegatedStreamingProtocol(), ProtocolSupport::Full)),
                 rr_cfg.clone(),
             ),
+            galt_identify: RequestResponse::new(
+                GaltIdentifyCodec {},
+                std::iter::once((GaltIdentifyProtocol(), ProtocolSupport::Full)),
+                rr_cfg.clone(),
+            ),
             payment_info: RequestResponse::new(
                 PaymentInfoCodec {},
                 std::iter::once((PaymentInfoProtocol(), ProtocolSupport::Full)),
@@ -116,13 +121,15 @@ pub async fn build(
             ),
             identify: Identify::new(IdentifyConfig::new(
                 "galtland/1.0.0".to_string(),
-                keypair.public(),
+                identity.keypair.public(),
             )),
             ping: ping::Behaviour::new(ping::Config::new().with_keep_alive(true)),
             rendezvous_server: rendezvous::server::Behaviour::new(
                 rendezvous::server::Config::default(),
             ),
-            rendezvous_client: rendezvous::client::Behaviour::new(keypair),
+            rendezvous_client: rendezvous::client::Behaviour::new(
+                identity.keypair.as_ref().to_owned(),
+            ),
             gossip,
             relay_server: relay::Relay::new(my_peer_id, Default::default()),
             dcutr: dcutr::behaviour::Behaviour::new(),

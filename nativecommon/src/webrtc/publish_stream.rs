@@ -2,19 +2,20 @@ use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use galtcore::daemons::cm::{self, ClientCommand};
+use galtcore::cm::{self, SharedGlobalState};
+use galtcore::networkbackendclient::NetworkBackendClient;
 use galtcore::protocols::delegated_streaming::{self, WebRtcTrack};
 use galtcore::protocols::kademlia_record::StreamingRecord;
 use galtcore::protocols::media_streaming::{
-    IntegerStreamTrack, MyRTCRtpCodecCapability, SignedStreamingData, StreamMetadata, StreamOffset,
-    StreamingData, StreamingDataType,
+    IntegerStreamTrack, MyRTCRtpCodecCapability, StreamMetadata, StreamOffset, StreamingData,
+    StreamingDataType, VerifiedSignedStreamingData,
 };
 use galtcore::protocols::NodeIdentity;
 use galtcore::tokio_stream::StreamExt;
 use galtcore::utils;
 use instant::Duration;
 use libp2p::futures::stream::FuturesUnordered;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use webrtc::track::track_remote::TrackRemote;
 
 
@@ -64,8 +65,9 @@ async fn get_next_read(context: PacketReadContext) -> RemoteTrackReadResult {
 pub(super) async fn publish(
     info: delegated_streaming::PublishStreamInfo,
     remote_tracks: &HashMap<WebRtcTrack, Arc<TrackRemote>>,
-    commands: &mpsc::Sender<ClientCommand>,
     identity: NodeIdentity,
+    shared_global_state: &SharedGlobalState,
+    network: &mut NetworkBackendClient,
 ) -> anyhow::Result<DelegatedStreamingPublishingState> {
     let streaming_key = info.streaming_key.clone();
 
@@ -80,15 +82,15 @@ pub(super) async fn publish(
         instant::SystemTime::now().into(),
     )?;
     let (sender, receiver) = oneshot::channel();
-    commands
-        .send(ClientCommand::PublishStream(
-            cm::streaming::handlers::PublishStreamInfo {
-                record: record.clone(),
-                sender,
-            },
-        ))
-        .await
-        .map_err(utils::send_error)?;
+    cm::modules::streaming::handlers::publish(
+        shared_global_state,
+        network,
+        cm::modules::streaming::handlers::PublishStreamInfo {
+            record: record.clone(),
+            sender,
+        },
+    )
+    .await?;
 
     let publisher = receiver
         .await
@@ -146,7 +148,7 @@ pub(super) async fn publish(
                             streaming_key,
                             data.len()
                         );
-                        let streaming_data = vec![SignedStreamingData::from(
+                        let streaming_data = vec![VerifiedSignedStreamingData::from(
                             StreamingData {
                                 data,
                                 source_offset: StreamOffset {

@@ -24,7 +24,7 @@ pub(crate) fn handle_event(
                     peer,
                     request
                 );
-                swarm
+                if swarm
                     .behaviour_mut()
                     .event_sender
                     .send(InternalNetworkEvent::InboundPaymentInfoRequest {
@@ -32,7 +32,10 @@ pub(crate) fn handle_event(
                         request,
                         channel,
                     })
-                    .expect("receiver to be receiving");
+                    .is_err()
+                {
+                    log::warn!("Event sender dropped while sending inbound payment info request")
+                };
             }
             RequestResponseMessage::Response {
                 request_id,

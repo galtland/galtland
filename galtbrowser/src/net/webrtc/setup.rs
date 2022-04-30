@@ -320,7 +320,7 @@ pub(super) async fn add_ice_candidate(
 }
 
 pub(super) async fn get_display_media() -> anyhow::Result<MediaStream> {
-    let w = window().ok_or(anyhow::anyhow!("Missing window"))?;
+    let w = window().ok_or_else(|| anyhow::anyhow!("Missing window"))?;
     let media_devices = w
         .navigator()
         .media_devices()
@@ -383,8 +383,10 @@ pub(crate) async fn get_answer(
 }
 
 pub(crate) fn play_video(stream: &MediaStream) -> anyhow::Result<()> {
-    let w = window().ok_or(anyhow::anyhow!("Missing window"))?;
-    let d = w.document().ok_or(anyhow::anyhow!("Missing document"))?;
+    let w = window().ok_or_else(|| anyhow::anyhow!("Missing window"))?;
+    let d = w
+        .document()
+        .ok_or_else(|| anyhow::anyhow!("Missing document"))?;
     if let Some(video) = d.get_element_by_id("main_video_stream") {
         let video: JsValue = video.into();
         let video: HtmlMediaElement = video.into();
@@ -397,7 +399,7 @@ pub(crate) fn play_video(stream: &MediaStream) -> anyhow::Result<()> {
 }
 
 pub(super) async fn get_user_media() -> anyhow::Result<MediaStream> {
-    let w = window().ok_or(anyhow::anyhow!("Missing window"))?;
+    let w = window().ok_or_else(|| anyhow::anyhow!("Missing window"))?;
     let media_devices = w
         .navigator()
         .media_devices()

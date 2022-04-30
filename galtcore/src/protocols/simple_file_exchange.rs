@@ -144,15 +144,19 @@ pub(crate) fn handle_event(
                 let key = libp2p::kad::record::Key::new(&request.key);
 
                 match b.state.published_files_mapping.get(&key).cloned() {
-                    Some(filename) => b
-                        .event_sender
-                        .send(InternalNetworkEvent::InboundFileRequest {
-                            peer,
-                            request,
-                            filename,
-                            channel,
-                        })
-                        .expect("receiver to be receiving"),
+                    Some(filename) => {
+                        if b.event_sender
+                            .send(InternalNetworkEvent::InboundFileRequest {
+                                peer,
+                                request,
+                                filename,
+                                channel,
+                            })
+                            .is_err()
+                        {
+                            log::warn!("Event sender dropped while sending inbound request")
+                        }
+                    }
                     None => warn!(
                         "Received request but no file published for key {:?}",
                         request.key

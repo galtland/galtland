@@ -6,17 +6,17 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use galtcore::daemons::cm::streaming::handlers::{PlayStreamInfo, PublishStreamInfo};
-use galtcore::daemons::cm::streaming::stream_publisher::StreamPublisherClient;
-use galtcore::daemons::cm::ClientCommand;
+use galtcore::cm::modules::streaming::handlers::{PlayStreamInfo, PublishStreamInfo};
+use galtcore::cm::modules::streaming::stream_publisher::StreamPublisherClient;
+use galtcore::cm::{self, SharedGlobalState};
+use galtcore::networkbackendclient::NetworkBackendClient;
 use galtcore::protocols::kademlia_record::StreamingRecord;
 use galtcore::protocols::media_streaming::{
-    IntegerStreamTrack, RTMPFrameType, RtmpMetadata, SignedStreamingData, StreamMetadata,
-    StreamOffset, StreamSeekType, StreamingData, StreamingDataType, StreamingKey,
-    StreamingResponse,
+    IntegerStreamTrack, RTMPFrameType, RtmpMetadata, StreamMetadata, StreamOffset, StreamSeekType,
+    StreamingData, StreamingDataType, StreamingKey, StreamingResponse, VerifiedSignedStreamingData,
 };
 use galtcore::protocols::NodeIdentity;
-use galtcore::utils::{self, spawn_and_log_error};
+use galtcore::utils::spawn_and_log_error;
 use libp2p::bytes::BytesMut;
 use libp2p::PeerId;
 use rml_rtmp::chunk_io::Packet;
@@ -28,7 +28,7 @@ use rml_rtmp::time::RtmpTimestamp;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, ReadHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::{self};
 use tokio::sync::oneshot;
 use webrtc::api::media_engine::MIME_TYPE_H264;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
@@ -38,7 +38,8 @@ use webrtc::rtp_transceiver::RTCPFeedback;
 pub async fn accept_loop(
     addr: SocketAddr,
     identity: NodeIdentity,
-    commands: Sender<ClientCommand>,
+    shared_global_state: SharedGlobalState,
+    network: NetworkBackendClient,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     log::info!("RTMP Server is listening to {}", addr);
@@ -48,8 +49,12 @@ pub async fn accept_loop(
             Ok((stream, address)) => {
                 log::info!("New connection: {}", address);
                 let identity = identity.clone();
-                let commands = commands.clone();
-                spawn_and_log_error(connection_loop(stream, identity, commands));
+                spawn_and_log_error(connection_loop(
+                    stream,
+                    identity,
+                    shared_global_state.clone(),
+                    network.clone(),
+                ));
             }
             Err(e) => {
                 log::warn!("Error accepting new RTMP connection: {}", e);
@@ -68,7 +73,8 @@ fn clone(p: &rml_rtmp::chunk_io::Packet) -> rml_rtmp::chunk_io::Packet {
 async fn connection_loop(
     mut stream: TcpStream,
     identity: NodeIdentity,
-    commands: Sender<ClientCommand>,
+    shared_global_state: SharedGlobalState,
+    mut network: NetworkBackendClient,
 ) -> anyhow::Result<()> {
     let capability = RTCRtpCodecCapability {
         mime_type: MIME_TYPE_H264.to_owned(),
@@ -294,13 +300,16 @@ async fn connection_loop(
                             &streaming_key,
                             SystemTime::now().into(),
                         )?;
-                        if commands
-                            .send(ClientCommand::PublishStream(PublishStreamInfo {
+                        if cm::modules::streaming::handlers::publish(
+                            &shared_global_state,
+                            &mut network,
+                            PublishStreamInfo {
                                 record: record.clone(),
                                 sender,
-                            }))
-                            .await
-                            .is_err()
+                            },
+                        )
+                        .await
+                        .is_err()
                         {
                             reader_receiver.close();
                             stream.shutdown().await?;
@@ -475,7 +484,7 @@ async fn connection_loop(
                             stream_id: 0,
                         };
 
-                        let streaming_data = SignedStreamingData::from(
+                        let streaming_data = VerifiedSignedStreamingData::from(
                             StreamingData {
                                 data: data.to_vec(),
                                 source_offset: StreamOffset {
@@ -560,13 +569,16 @@ async fn connection_loop(
                             channel_key: stream_key,
                         };
                         let (sender, receiver) = oneshot::channel();
-                        commands
-                            .send(ClientCommand::PlayStream(PlayStreamInfo {
+                        cm::modules::streaming::handlers::play(
+                            identity.clone(),
+                            &shared_global_state,
+                            &mut network,
+                            PlayStreamInfo {
                                 streaming_key,
                                 sender,
-                            }))
-                            .await
-                            .map_err(utils::send_error)?;
+                            },
+                        )
+                        .await?;
 
                         let publisher = receiver.await??;
 
@@ -707,11 +719,11 @@ fn _from_to_streaming_data_packets(
     stream_track: &IntegerStreamTrack,
     identity: &NodeIdentity,
     record: &StreamingRecord,
-) -> (StreamOffset, Vec<SignedStreamingData>) {
+) -> (StreamOffset, Vec<VerifiedSignedStreamingData>) {
     let packets = packets
         .iter()
         .map(|data| {
-            let r = SignedStreamingData::from(
+            let r = VerifiedSignedStreamingData::from(
                 StreamingData {
                     data: _serialize_packet(data)?,
                     source_offset: StreamOffset {

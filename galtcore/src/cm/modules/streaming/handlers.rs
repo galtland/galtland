@@ -8,35 +8,27 @@ use log::debug;
 use tokio::sync::oneshot;
 
 use super::stream_publisher::{self, StreamPublisherClient};
+use crate::cm::modules::peer_control::FloodControlResult;
+use crate::cm::modules::streaming::stream_seeker;
+use crate::cm::SharedGlobalState;
 use crate::configuration::Configuration;
-use crate::daemons::cm::peer_control::FloodControlResult;
-use crate::daemons::cm::streaming::stream_seeker;
-use crate::daemons::cm::SharedGlobalState;
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::kademlia_record::StreamingRecord;
 use crate::protocols::media_streaming::{
     StreamingKey, StreamingRequest, StreamingResponse, WrappedStreamingResponseResult,
 };
-use crate::protocols::payment_info::{PaymentInfoRequest, PaymentInfoResponseResult};
 use crate::protocols::NodeIdentity;
+use crate::utils;
 
 pub struct PublishStreamInfo {
     pub record: StreamingRecord,
     pub sender: oneshot::Sender<anyhow::Result<StreamPublisherClient>>,
 }
 
-#[derive(Debug)]
 pub struct RespondStreamingInfo {
     pub peer: PeerId,
     pub request: StreamingRequest,
     pub channel: ResponseChannel<WrappedStreamingResponseResult>,
-}
-
-#[derive(Debug)]
-pub struct RespondPaymentInfo {
-    pub peer: PeerId,
-    pub request: PaymentInfoRequest,
-    pub channel: ResponseChannel<PaymentInfoResponseResult>,
 }
 
 pub struct PlayStreamInfo {
@@ -44,9 +36,9 @@ pub struct PlayStreamInfo {
     pub sender: oneshot::Sender<anyhow::Result<StreamPublisherClient>>,
 }
 
-pub(crate) async fn publish(
-    shared_state: SharedGlobalState,
-    network: NetworkBackendClient,
+pub async fn publish(
+    shared_state: &SharedGlobalState,
+    network: &mut NetworkBackendClient,
     info: PublishStreamInfo,
 ) -> anyhow::Result<()> {
     let PublishStreamInfo { sender, record } = info;
@@ -77,9 +69,7 @@ pub(crate) async fn publish(
         .cloned();
     match daemon_sender {
         Some(daemon_sender) => {
-            if sender.send(Ok(daemon_sender)).is_err() {
-                anyhow::bail!("receiver died");
-            }
+            sender.send(Ok(daemon_sender)).map_err(utils::send_error)?;
         }
         None => {
             stream_publisher::launch_daemon(
@@ -117,6 +107,12 @@ pub(crate) async fn respond(
         FloodControlResult::Good => {
             debug!("respond is good {} {:?}", peer, request);
         }
+        FloodControlResult::SameOrgPeer => {
+            debug!(
+                "respond is good because peer is form same organization {} {:?}",
+                peer, request
+            );
+        }
         other @ (FloodControlResult::Blacklisted | FloodControlResult::StillBlacklisted) => {
             debug!("respond is bad {} {:?}: {:?}", peer, request, other);
             network
@@ -134,6 +130,8 @@ pub(crate) async fn respond(
     let stream_publisher_client = match daemon_sender {
         Some(d) => d,
         None => {
+            // TODO: in fact we should do this check for every request because streaming fluctuations or
+            // the need to accommodate org peers can lead to saturation of upload link
             let current_bytes_per_second =
                 shared_state.sent_stats.lock().await.get_bytes_per_second();
             let max_bytes_per_second = opt
@@ -218,10 +216,11 @@ pub(crate) async fn respond(
     Ok(())
 }
 
-pub(crate) async fn play(
+
+pub async fn play(
     identity: NodeIdentity,
-    shared_state: SharedGlobalState,
-    network: NetworkBackendClient,
+    shared_global_state: &SharedGlobalState,
+    network: &mut NetworkBackendClient,
     info: PlayStreamInfo,
 ) -> anyhow::Result<()> {
     let PlayStreamInfo {
@@ -229,7 +228,7 @@ pub(crate) async fn play(
         sender,
     } = info;
     debug!("play {:?}", streaming_key);
-    let stream_publisher_client = shared_state
+    let stream_publisher_client = shared_global_state
         .active_streams
         .lock()
         .await
@@ -237,14 +236,20 @@ pub(crate) async fn play(
         .cloned();
     match stream_publisher_client {
         Some(stream_publisher_client) => {
-            if sender.send(Ok(stream_publisher_client)).is_err() {
-                anyhow::bail!("receiver died");
-            }
+            sender
+                .send(Ok(stream_publisher_client))
+                .map_err(utils::send_error)?;
             Ok(())
         }
         None => {
-            stream_seeker::launch_daemon(identity, streaming_key, sender, shared_state, network)
-                .await
+            stream_seeker::launch_daemon(
+                identity,
+                streaming_key,
+                sender,
+                shared_global_state.clone(),
+                network.clone(),
+            )
+            .await
         }
     }
 }

@@ -1,46 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-pub mod payment_info;
-pub mod peer_control;
-pub mod simple_file;
-pub mod streaming;
 
 use std::collections::HashMap;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use libp2p::PeerId;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{oneshot, Mutex};
 
-use self::peer_control::PeerControl;
-use self::simple_file::{GetSimpleFileInfo, PublishSimpleFileInfo, RespondSimpleFileInfo};
-use self::streaming::handlers::{
-    PlayStreamInfo, PublishStreamInfo, RespondPaymentInfo, RespondStreamingInfo,
-};
-use self::streaming::stream_publisher::StreamPublisherClient;
-use crate::configuration::Configuration;
-use crate::networkbackendclient::NetworkBackendClient;
+use self::modules::peer_control::PeerControl;
+use self::modules::streaming::stream_publisher::StreamPublisherClient;
 use crate::protocols::media_streaming::StreamingKey;
 use crate::protocols::simple_file_exchange::SimpleFileResponse;
-use crate::protocols::NodeIdentity;
-use crate::utils;
 use crate::utils::ArcMutex;
 
-#[allow(clippy::large_enum_variant)]
-pub enum ClientCommand {
-    RespondSimpleFile(RespondSimpleFileInfo),
-    PublishSimpleFile(PublishSimpleFileInfo),
-    GetSimpleFile(GetSimpleFileInfo),
-    PublishStream(PublishStreamInfo),
-    PlayStream(PlayStreamInfo),
-    RespondStreamingRequest(RespondStreamingInfo),
-    RespondPaymentInfoRequest(RespondPaymentInfo),
-    FeedSentStreamingResponseStats(SentStreamingResponseStats),
-}
 
+pub mod modules;
 
 #[derive(Debug)]
 pub struct SentStreamingResponseStats {
@@ -119,7 +96,7 @@ pub struct SharedGlobalState {
 }
 
 impl SharedGlobalState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             sent_stats: Arc::new(Mutex::new(SentStats::new())),
             active_file_transfers: Arc::new(Mutex::new(HashMap::new())),
@@ -130,54 +107,16 @@ impl SharedGlobalState {
     }
 }
 
-pub async fn run_loop(
-    opt: Configuration,
-    network: NetworkBackendClient,
-    mut receiver: Receiver<ClientCommand>,
-    identity: NodeIdentity,
-) -> anyhow::Result<()> {
-    let shared_global_state = SharedGlobalState::new();
-    loop {
-        tokio::task::yield_now().await;
-        let e = receiver.recv().await.context("Loop finished")?;
-        utils::spawn_and_log_error(handle_client_command(
-            opt.clone(),
-            identity.clone(),
-            shared_global_state.clone(),
-            network.clone(),
-            e,
-        ));
+impl Default for SharedGlobalState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-async fn handle_client_command(
-    opt: Configuration,
-    identity: NodeIdentity,
-    shared_state: SharedGlobalState,
-    network: NetworkBackendClient,
-    command: ClientCommand,
-) -> anyhow::Result<()> {
-    match command {
-        ClientCommand::PublishSimpleFile(info) => simple_file::handle_publish(network, info).await,
-        ClientCommand::GetSimpleFile(info) => simple_file::handle_get(network, info).await,
-        ClientCommand::RespondSimpleFile(info) => {
-            simple_file::handle_respond(shared_state, network, info).await
-        }
-        ClientCommand::RespondPaymentInfoRequest(info) => {
-            payment_info::handle_respond(network, info).await
-        }
-        ClientCommand::PublishStream(info) => {
-            streaming::handlers::publish(shared_state, network, info).await
-        }
-        ClientCommand::PlayStream(info) => {
-            streaming::handlers::play(identity, shared_state, network, info).await
-        }
-        ClientCommand::RespondStreamingRequest(info) => {
-            streaming::handlers::respond(opt, identity, shared_state, network, info).await
-        }
-        ClientCommand::FeedSentStreamingResponseStats(info) => {
-            shared_state.sent_stats.lock().await.push(info);
-            Ok(())
-        }
-    }
+
+pub async fn feed_streaming_response_stats(
+    shared_global_state: SharedGlobalState,
+    info: SentStreamingResponseStats,
+) {
+    shared_global_state.sent_stats.lock().await.push(info);
 }

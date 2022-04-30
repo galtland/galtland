@@ -77,6 +77,8 @@ impl WebRtcState {
                         BroadcastableNetworkEvent::ReceivedGossip { .. } => {}
                         BroadcastableNetworkEvent::PutRecord { .. } => {}
                         BroadcastableNetworkEvent::SentStreamingResponseStats { .. } => {}
+                        BroadcastableNetworkEvent::PingInfo { .. } => {}
+                        BroadcastableNetworkEvent::IdentifyInfo { .. } => {}
                         BroadcastableNetworkEvent::ConnectionEstablished { peer, endpoint } if endpoint == delegated_streaming_endpoint => {
                             if self.connection_state.lock().await.is_some() {
                                 log::info!("Reconnecting to {peer} but webrtc connection has been already established");

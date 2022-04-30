@@ -207,13 +207,13 @@ impl StreamingData {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignedStreamingData {
-    pub streaming_data: StreamingData,
-    pub signature: Vec<u8>,
+#[derive(Clone)]
+pub struct VerifiedSignedStreamingData {
+    pub signed_streaming_data: SignedStreamingData,
+    pub hash: blake3::Hash,
 }
 
-impl SignedStreamingData {
+impl VerifiedSignedStreamingData {
     pub fn from(
         data: StreamingData,
         keypair: &Keypair,
@@ -221,15 +221,49 @@ impl SignedStreamingData {
     ) -> anyhow::Result<Self> {
         let hash = data.hash(record.key.as_ref());
         let signature = keypair.sign(hash.as_bytes())?;
-        Ok(SignedStreamingData {
-            streaming_data: data,
-            signature,
+        Ok(VerifiedSignedStreamingData {
+            signed_streaming_data: SignedStreamingData {
+                streaming_data: data,
+                signature,
+            },
+            hash,
         })
     }
 
-    pub(crate) fn verify(&self, record: &StreamingRecord) -> bool {
+    pub fn to_peek_result(self) -> SignedStreamingData {
+        let streaming_data = StreamingData {
+            data: self.hash.as_bytes().to_vec(),
+            ..self.signed_streaming_data.streaming_data
+        };
+        SignedStreamingData {
+            streaming_data,
+            ..self.signed_streaming_data
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedStreamingData {
+    pub streaming_data: StreamingData,
+    pub signature: Vec<u8>,
+}
+
+impl SignedStreamingData {
+    pub fn to_verify(self, record: &StreamingRecord) -> Option<VerifiedSignedStreamingData> {
         let hash = self.streaming_data.hash(record.key.as_ref());
-        record.public_key.verify(hash.as_bytes(), &self.signature)
+        if record.public_key.verify(hash.as_bytes(), &self.signature) {
+            Some(VerifiedSignedStreamingData {
+                signed_streaming_data: self,
+                hash,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn is_valid_peek(&self, record: &StreamingRecord) -> bool {
+        let hash = self.streaming_data.data.as_slice();
+        record.public_key.verify(hash, &self.signature)
     }
 }
 
@@ -627,7 +661,7 @@ pub(crate) fn handle_event(
                     peer,
                     request
                 );
-                swarm
+                if swarm
                     .behaviour_mut()
                     .event_sender
                     .send(InternalNetworkEvent::InboundStreamingDataRequest {
@@ -635,7 +669,10 @@ pub(crate) fn handle_event(
                         request,
                         channel,
                     })
-                    .expect("receiver to be receiving");
+                    .is_err()
+                {
+                    log::warn!("Event sender dropped while sending inbound streaming data request")
+                };
             }
             RequestResponseMessage::Response {
                 request_id,
@@ -700,6 +737,39 @@ mod tests {
         let s = "12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo/5ezFfhtXGXtJcodB6E3Fu3cXTKkYERTGDH5x2JADMTZk";
         let k: StreamingKey = s.try_into()?;
         assert_eq!(s, k.to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn test_verified_signed_streaming_data() -> anyhow::Result<()> {
+        use rand::Rng;
+        let mut data = [0u8; 1024];
+        rand::thread_rng().fill(&mut data);
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let streaming_key = StreamingKey {
+            channel_key: PeerId::random(),
+            video_key: data.to_vec(),
+        };
+        let record = StreamingRecord::new(&keypair, &streaming_key, chrono::offset::Utc::now())?;
+        let v = VerifiedSignedStreamingData::from(
+            StreamingData {
+                data: data.into(),
+                stream_track: IntegerStreamTrack {
+                    stream_id: 0,
+                    track_id: 0,
+                },
+                metadata: None,
+                source_offset: StreamOffset {
+                    timestamp_reference: 0,
+                    sequence_id: 0,
+                },
+                data_type: StreamingDataType::WebRtcRtpPacket,
+            },
+            &keypair,
+            &record,
+        )?;
+        assert!(v.signed_streaming_data.clone().to_verify(&record).is_some());
+        assert!(v.to_peek_result().is_valid_peek(&record));
         Ok(())
     }
 }

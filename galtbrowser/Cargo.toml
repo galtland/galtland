@@ -52,7 +52,7 @@ web-sys = {version = "0.3.56", features = [
 js-sys = "0.3.56"
 wasm-bindgen-futures = "0.4.29"
 
-libp2p = { version = "0.43", features = [
+libp2p = { version = "0.44", features = [
     "wasm-bindgen",
     "wasm-ext",
     "wasm-ext-websocket",

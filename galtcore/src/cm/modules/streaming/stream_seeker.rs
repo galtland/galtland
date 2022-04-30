@@ -9,12 +9,12 @@ use rayon::prelude::*;
 use tokio::sync::oneshot;
 
 use super::stream_publisher::StreamPublisherClient;
-use crate::daemons::cm::streaming::{peer_seeker, stream_publisher};
-use crate::daemons::cm::SharedGlobalState;
+use crate::cm::modules::streaming::{peer_seeker, stream_publisher};
+use crate::cm::SharedGlobalState;
 use crate::networkbackendclient::NetworkBackendClient;
 use crate::protocols::kademlia_record::{KademliaRecord, StreamingRecord};
 use crate::protocols::media_streaming::{
-    StreamSeekType, StreamingKey, StreamingRequest, StreamingResponse,
+    StreamSeekType, StreamingKey, StreamingRequest, StreamingResponse, VerifiedSignedStreamingData,
 };
 use crate::protocols::NodeIdentity;
 use crate::utils;
@@ -121,9 +121,7 @@ async fn _stream_seeker_daemon(
         match client {
             Some(c) => {
                 log::debug!("Found stream daemon for {:?}", streaming_key);
-                if initializer.send(Ok(c.clone())).is_err() {
-                    anyhow::bail!("Initializer died");
-                }
+                initializer.send(Ok(c.clone())).map_err(utils::send_error)?;
                 c
             }
             None => stream_publisher::launch_daemon(
@@ -142,6 +140,7 @@ async fn _stream_seeker_daemon(
         identity,
         shared_state.clone(),
         network.clone(),
+        record.clone(),
         streaming_key.clone(),
     );
     let mut seek_type = StreamSeekType::Reset;
@@ -180,15 +179,19 @@ async fn _stream_seeker_daemon(
 
             match request_result {
                 (peer, Ok(Ok(StreamingResponse::Data(responses)))) if !responses.is_empty() => {
-                    let responses_len = responses.len();
-                    let valid_responses_len = utils::measure_noop("r.verify", || {
-                        responses.par_iter().filter(|r| r.verify(&record)).count()
-                    });
-                    if responses_len != valid_responses_len {
+                    let original_responses_len = responses.len();
+                    let responses: Vec<VerifiedSignedStreamingData> =
+                        utils::measure_noop("r.verify", || {
+                            responses
+                                .into_par_iter()
+                                .filter_map(|r| r.to_verify(&record))
+                        })
+                        .collect();
+                    if original_responses_len != responses.len() {
                         log::warn!(
                             "Received {} responses but only {} are valid, skipping peer for now",
-                            responses_len,
-                            valid_responses_len
+                            original_responses_len,
+                            responses.len()
                         );
                         seeker_client.ban_on_recoverable_error(peer).await?;
                     }
@@ -197,7 +200,7 @@ async fn _stream_seeker_daemon(
                     consecutive_errors = 0;
                     log::info!(
                         "Found {} responses for {:?} from {}",
-                        responses_len,
+                        original_responses_len,
                         streaming_key,
                         {
                             if streaming_key.channel_key == peer {
@@ -209,7 +212,7 @@ async fn _stream_seeker_daemon(
                     );
                     let new_source_offset = responses
                         .iter()
-                        .map(|r| r.streaming_data.source_offset)
+                        .map(|r| r.signed_streaming_data.streaming_data.source_offset)
                         .max()
                         .context("empty list")?;
 

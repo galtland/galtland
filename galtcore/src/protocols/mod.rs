@@ -2,6 +2,7 @@
 
 pub mod dcutr_behaviour;
 pub mod delegated_streaming;
+pub mod galt_identify;
 pub mod gossip;
 pub mod kademlia_record;
 pub mod media_streaming;
@@ -11,9 +12,10 @@ pub mod simple_file_exchange;
 pub mod webrtc_signaling;
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::Context;
+use bytes::Bytes;
 use kademlia_record::KademliaRecord;
 use libp2p::core::ConnectedPoint;
 use libp2p::identify::{Identify, IdentifyEvent};
@@ -26,8 +28,9 @@ use libp2p::kad::{
 };
 // use libp2p::mdns::MdnsEvent;
 use libp2p::relay::v2::relay;
-use libp2p::rendezvous::{self, Cookie};
+use libp2p::rendezvous::{self, Cookie, Namespace};
 use libp2p::request_response::{RequestResponse, RequestResponseEvent};
+use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{DialError, SwarmEvent};
 use libp2p::{dcutr, floodsub, multiaddr, ping, PeerId, Swarm};
 use log::{debug, info, warn};
@@ -36,6 +39,7 @@ use simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use self::delegated_streaming::{DelegatedStreamingRequest, DelegatedStreamingResponseResult};
+use self::galt_identify::{GaltIdentifyRequest, GaltIdentifyResponseResult, GaltOrganization};
 use self::media_streaming::StreamingResponseResult;
 use self::payment_info::{PaymentInfoRequest, PaymentInfoResponseResult};
 use self::webrtc_signaling::{SignalingRequestOrResponse, WebRtcSignalingResponseResult};
@@ -44,7 +48,7 @@ use crate::daemons::internal_network_events::{BroadcastableNetworkEvent, Interna
 use crate::networkbackendclient::{NetworkBackendCommand, RequestStreamingDataParams};
 use crate::utils;
 
-pub const RENDEZVOUS_NAMESPACE: &str = "rendezvous";
+pub const DEFAULT_RENDEZVOUS_NAMESPACE: &str = "d";
 
 // pub(crate) fn handle_mdns_event(event: MdnsEvent, _swarm: &mut Swarm<ComposedBehaviour>) {
 //     match event {
@@ -384,19 +388,20 @@ pub(crate) fn handle_rendezvous_client(
             if registrations.is_empty() {
                 debug!("No registrations available")
             }
-            if let Some(state) = swarm
-                .behaviour_mut()
-                .state
-                .rendezvous_peers
-                .get_mut(&rendezvous_node)
-            {
-                state.cookie.replace(new_cookie);
-            };
-
             let my_peer_id = *swarm.local_peer_id();
 
             let mut added_new_peers = false;
             for registration in registrations {
+                if let Some(state) = swarm
+                    .behaviour_mut()
+                    .state
+                    .rendezvous_peers
+                    .get_mut(&rendezvous_node)
+                {
+                    state
+                        .cookies
+                        .insert(registration.namespace, new_cookie.clone());
+                }
                 for address in registration.record.addresses() {
                     let peer = registration.record.peer_id();
                     if peer == my_peer_id {
@@ -457,6 +462,7 @@ pub(crate) fn handle_rendezvous_client(
 pub(crate) fn handle_identity(
     event: IdentifyEvent,
     opt: &Configuration,
+    identity: &NodeIdentity,
     swarm: &mut Swarm<ComposedBehaviour>,
 ) {
     match event {
@@ -473,10 +479,26 @@ pub(crate) fn handle_identity(
                     .contains_key(&peer_id)
             {
                 swarm.behaviour_mut().rendezvous_client.register(
-                    rendezvous::Namespace::from_static(RENDEZVOUS_NAMESPACE),
+                    rendezvous::Namespace::from_static(DEFAULT_RENDEZVOUS_NAMESPACE),
                     peer_id,
                     Some(rendezvous::MIN_TTL),
                 );
+                swarm.behaviour_mut().rendezvous_client.register(
+                    identity.org_namespace.as_ref().to_owned(),
+                    peer_id,
+                    Some(rendezvous::MIN_TTL),
+                );
+            }
+            if swarm
+                .behaviour_mut()
+                .broadcast_event_sender
+                .send(BroadcastableNetworkEvent::IdentifyInfo {
+                    peer: peer_id,
+                    info,
+                })
+                .is_err()
+            {
+                log::warn!("Error sending BroadcastableNetworkEvent::IdentifyInfo {{ {peer_id} }}");
             }
         }
         IdentifyEvent::Sent { peer_id } => debug!("IdentifyEvent::Sent {}", peer_id),
@@ -488,25 +510,32 @@ pub(crate) fn handle_identity(
 pub(crate) fn handle_ping(event: ping::Event, swarm: &mut Swarm<ComposedBehaviour>) {
     match event.result {
         Ok(ping::Success::Ping { rtt }) => {
-            log::debug!("Success ping {:?} to {}", rtt, event.peer);
-            let peer_statistics = swarm
+            let peer = event.peer;
+            log::debug!("Success ping {rtt:?} to {peer}");
+            if swarm
                 .behaviour_mut()
-                .state
-                .peer_statistics
-                .entry(event.peer)
-                .or_default();
-            peer_statistics.latency.replace(rtt);
+                .broadcast_event_sender
+                .send(BroadcastableNetworkEvent::PingInfo {
+                    peer,
+                    rtt: Some(rtt),
+                })
+                .is_err()
+            {
+                log::warn!("Error sending BroadcastableNetworkEvent::PingInfo {{ {peer} }}");
+            }
         }
         Ok(ping::Success::Pong) => log::debug!("Success pong from {}", event.peer),
         Err(e) => {
-            log::info!("Ping failure {} to {}", e, event.peer);
-            let peer_statistics = swarm
+            let peer = event.peer;
+            log::info!("Ping failure {e} to {peer}");
+            if swarm
                 .behaviour_mut()
-                .state
-                .peer_statistics
-                .entry(event.peer)
-                .or_default();
-            peer_statistics.latency.take();
+                .broadcast_event_sender
+                .send(BroadcastableNetworkEvent::PingInfo { peer, rtt: None })
+                .is_err()
+            {
+                log::warn!("Error sending BroadcastableNetworkEvent::PingInfo {{ {peer} }}");
+            }
         }
     }
 }
@@ -653,10 +682,6 @@ pub fn handle_network_backend_command(
                 log::warn!("Expected connection to peer to be still open while sending response");
             };
         }
-        NetworkBackendCommand::GetPeerStatistics { sender } => {
-            let peer_statistics = swarm.behaviour().state.peer_statistics.clone();
-            sender.send(peer_statistics).map_err(utils::send_error)?;
-        }
         NetworkBackendCommand::RespondPaymentInfo { response, channel } => {
             if swarm
                 .behaviour_mut()
@@ -734,6 +759,40 @@ pub fn handle_network_backend_command(
                 log::warn!("Expected connection to peer to be still open while sending response");
             };
         }
+        NetworkBackendCommand::RequestGaltIdentify {
+            request,
+            peer,
+            sender,
+        } => {
+            let b = swarm.behaviour_mut();
+            let request_id = b.galt_identify.send_request(&peer, request);
+            b.state
+                .pending_galt_identify_request
+                .insert(request_id, sender);
+        }
+        NetworkBackendCommand::RespondGaltIdentify { response, channel } => {
+            if swarm
+                .behaviour_mut()
+                .galt_identify
+                .send_response(channel, response)
+                .is_err()
+            {
+                log::warn!("Expected connection to peer to be still open while sending response");
+            };
+        }
+        NetworkBackendCommand::Dial {
+            peer,
+            addresses,
+            sender,
+        } => {
+            let result = swarm.dial(
+                DialOpts::peer_id(peer)
+                    .addresses(addresses)
+                    .condition(PeerCondition::NotDialing)
+                    .build(),
+            );
+            sender.send(result).map_err(utils::send_error)?;
+        }
     };
     Ok(())
 }
@@ -741,6 +800,7 @@ pub fn handle_network_backend_command(
 pub fn handle_swarm_event<E: std::fmt::Debug>(
     event: SwarmEvent<ComposedEvent, E>,
     opt: &Configuration,
+    identity: &NodeIdentity,
     swarm: &mut Swarm<ComposedBehaviour>,
 ) {
     match event {
@@ -802,7 +862,15 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
 
             if !opt.disable_rendezvous_discover {
                 swarm.behaviour_mut().rendezvous_client.discover(
-                    Some(rendezvous::Namespace::from_static(RENDEZVOUS_NAMESPACE)),
+                    Some(rendezvous::Namespace::from_static(
+                        DEFAULT_RENDEZVOUS_NAMESPACE,
+                    )),
+                    None,
+                    None,
+                    peer_id,
+                );
+                swarm.behaviour_mut().rendezvous_client.discover(
+                    Some(identity.org_namespace.as_ref().to_owned()),
                     None,
                     None,
                     peer_id,
@@ -869,7 +937,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             // ComposedEvent::Mdns(event) => handle_mdns_event(event, swarm),
             ComposedEvent::RendezvousServer(event) => handle_rendezvous_server(event),
             ComposedEvent::RendezvousClient(event) => handle_rendezvous_client(event, swarm),
-            ComposedEvent::Identify(event) => handle_identity(event, opt, swarm),
+            ComposedEvent::Identify(event) => handle_identity(event, opt, identity, swarm),
             ComposedEvent::Ping(event) => handle_ping(event, swarm),
             ComposedEvent::Gossip(event) => gossip::handle_gossip(event, swarm),
             ComposedEvent::Relay(event) => relay_server::handle(event, swarm),
@@ -878,6 +946,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             ComposedEvent::DelegatedStreaming(event) => {
                 delegated_streaming::handle_event(event, swarm)
             }
+            ComposedEvent::GaltIdentify(event) => galt_identify::handle_event(event, swarm),
         },
         SwarmEvent::BannedPeer { peer_id, endpoint } => {
             info!("SwarmEvent::BannedPeer {} at {:?}", peer_id, endpoint);
@@ -917,17 +986,17 @@ pub fn handle_discover_tick(opt: &Configuration, swarm: &mut Swarm<ComposedBehav
             .state
             .rendezvous_peers
             .values()
-            .any(|v| v.cookie.is_some());
+            .any(|v| !v.cookies.is_empty());
         if has_any {
             let rendezvous_peers = swarm.behaviour().state.rendezvous_peers.clone();
             for (peer, state) in rendezvous_peers {
-                if let Some(cookie) = state.cookie {
+                for (namespace, cookie) in state.cookies {
                     if swarm.is_connected(&peer) {
                         log::debug!(
                             "handle_discover_tick rendezvous_client.discover {cookie:?} {peer}"
                         );
                         swarm.behaviour_mut().rendezvous_client.discover(
-                            Some(rendezvous::Namespace::from_static(RENDEZVOUS_NAMESPACE)),
+                            Some(namespace),
                             Some(cookie),
                             None,
                             peer,
@@ -970,6 +1039,7 @@ pub enum ComposedEvent {
     DelegatedStreaming(
         RequestResponseEvent<DelegatedStreamingRequest, DelegatedStreamingResponseResult>,
     ),
+    GaltIdentify(RequestResponseEvent<GaltIdentifyRequest, GaltIdentifyResponseResult>),
     Kademlia(KademliaEvent),
     // Mdns(MdnsEvent),
     Identify(IdentifyEvent),
@@ -1023,6 +1093,12 @@ impl From<RequestResponseEvent<DelegatedStreamingRequest, DelegatedStreamingResp
         event: RequestResponseEvent<DelegatedStreamingRequest, DelegatedStreamingResponseResult>,
     ) -> Self {
         ComposedEvent::DelegatedStreaming(event)
+    }
+}
+
+impl From<RequestResponseEvent<GaltIdentifyRequest, GaltIdentifyResponseResult>> for ComposedEvent {
+    fn from(event: RequestResponseEvent<GaltIdentifyRequest, GaltIdentifyResponseResult>) -> Self {
+        ComposedEvent::GaltIdentify(event)
     }
 }
 
@@ -1082,7 +1158,7 @@ impl From<dcutr::behaviour::Event> for ComposedEvent {
 
 #[derive(Default, Debug, Clone)]
 pub struct RendezvousState {
-    cookie: Option<Cookie>,
+    cookies: HashMap<Namespace, Cookie>,
 }
 
 #[derive(Default)]
@@ -1124,15 +1200,16 @@ pub struct NetworkState {
             Result<DelegatedStreamingResponseResult, libp2p::request_response::OutboundFailure>,
         >,
     >,
+    pending_galt_identify_request: HashMap<
+        libp2p::request_response::RequestId,
+        oneshot::Sender<
+            Result<GaltIdentifyResponseResult, libp2p::request_response::OutboundFailure>,
+        >,
+    >,
     published_files_mapping: HashMap<libp2p::kad::record::Key, String>,
     rendezvous_peers: HashMap<PeerId, RendezvousState>,
-    peer_statistics: HashMap<PeerId, PeerStatistics>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PeerStatistics {
-    pub latency: Option<Duration>,
-}
 
 #[derive(libp2p::NetworkBehaviour)]
 #[behaviour(out_event = "ComposedEvent")]
@@ -1141,6 +1218,7 @@ pub struct ComposedBehaviour {
     pub media_streaming: RequestResponse<media_streaming::StreamingCodec>,
     pub webrtc_signaling: RequestResponse<webrtc_signaling::WebRtcSignalingCodec>,
     pub delegated_streaming: RequestResponse<delegated_streaming::DelegatedStreamingCodec>,
+    pub galt_identify: RequestResponse<galt_identify::GaltIdentifyCodec>,
     pub payment_info: RequestResponse<payment_info::PaymentInfoCodec>,
     pub kademlia: Kademlia<MemoryStore>,
     // mdns: Mdns,
@@ -1166,7 +1244,26 @@ pub struct ComposedBehaviour {
 
 #[derive(Clone)]
 pub struct NodeIdentity {
-    pub keypair: Keypair,
+    pub keypair: Arc<Keypair>,
     pub peer_id: PeerId,
-    pub org_keypair: Keypair,
+    pub org: GaltOrganization,
+    pub org_keypair: Arc<Keypair>,
+    pub org_namespace: Arc<Namespace>,
+    pub org_sig: Bytes,
+}
+
+impl NodeIdentity {
+    pub fn new(keypair: Keypair, org_keypair: Keypair) -> anyhow::Result<Self> {
+        let peer_id = keypair.public().to_peer_id();
+        let org_namespace = Namespace::new(org_keypair.public().to_peer_id().to_base58())?;
+        let org_sig = org_keypair.sign(&peer_id.to_bytes())?;
+        Ok(Self {
+            keypair: Arc::new(keypair),
+            org: GaltOrganization::new(org_keypair.public()),
+            org_keypair: Arc::new(org_keypair),
+            org_namespace: Arc::new(org_namespace),
+            peer_id,
+            org_sig: org_sig.into(),
+        })
+    }
 }

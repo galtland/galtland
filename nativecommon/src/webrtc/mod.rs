@@ -9,7 +9,7 @@ use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use anyhow::Context;
-use galtcore::daemons::cm::ClientCommand;
+use galtcore::cm::SharedGlobalState;
 use galtcore::networkbackendclient::NetworkBackendClient;
 use galtcore::protocols::delegated_streaming::{
     self, DelegatedStreamingRequest, DelegatedStreamingResponse, WebRtcStream, WebRtcTrack,
@@ -46,9 +46,9 @@ impl WebRtc {
     async fn initialize_or_get_state(
         self,
         peer: PeerId,
-        network: &NetworkBackendClient,
-        commands: mpsc::Sender<ClientCommand>,
         identity: NodeIdentity,
+        shared_global_state: &SharedGlobalState,
+        network: &mut NetworkBackendClient,
     ) -> anyhow::Result<PeerState> {
         {
             let mut state = self.state.lock().await;
@@ -96,8 +96,9 @@ impl WebRtc {
             peer,
             peer_state.clone(),
             track_receiver,
-            commands,
             identity,
+            shared_global_state.clone(),
+            network.clone(),
         ));
         utils::spawn_and_log_error(ice_candidate_receiver_loop(
             peer,
@@ -217,9 +218,9 @@ impl WebRtc {
     async fn handle_webrtc_signaling(
         self,
         event: webrtc_signaling::RequestEvent,
-        network: NetworkBackendClient,
-        commands: mpsc::Sender<ClientCommand>,
         identity: NodeIdentity,
+        shared_global_state: SharedGlobalState,
+        mut network: NetworkBackendClient,
     ) -> anyhow::Result<()> {
         let peer = event.peer;
         if event.request.description.is_some() && !event.request.ice_candidates.is_empty() {
@@ -231,7 +232,7 @@ impl WebRtc {
             Some(offer) => {
                 log::info!("Handling webrtc offer for peer {peer}");
                 match self
-                    .initialize_or_get_state(peer, &network, commands, identity)
+                    .initialize_or_get_state(peer, identity, &shared_global_state, &mut network)
                     .await
                 {
                     Ok(peer_state) => match Self::get_answer(peer_state.clone(), offer).await {
@@ -299,9 +300,9 @@ impl WebRtc {
     async fn handle_delegated_streaming_event(
         self,
         event: delegated_streaming::RequestEvent,
-        network: NetworkBackendClient,
-        commands: mpsc::Sender<ClientCommand>,
         identity: NodeIdentity,
+        shared_global_state: SharedGlobalState,
+        mut network: NetworkBackendClient,
     ) -> anyhow::Result<()> {
         let peer = event.peer;
         let peer_state = self.state.lock().await.get_mut(&peer).cloned();
@@ -329,8 +330,9 @@ impl WebRtc {
                                 match publish_stream::publish(
                                     info,
                                     pending_remote_tracks,
-                                    &commands,
                                     identity,
+                                    &shared_global_state,
+                                    &mut network,
                                 )
                                 .await
                                 {
@@ -390,7 +392,8 @@ impl WebRtc {
                                 peer,
                                 streaming_key,
                                 peer_state.clone(),
-                                commands,
+                                identity.clone(),
+                                shared_global_state.clone(),
                                 network.clone(),
                             )
                             .await?;
@@ -423,9 +426,9 @@ impl WebRtc {
         mut delegated_streaming_receiver: mpsc::UnboundedReceiver<
             delegated_streaming::RequestEvent,
         >,
-        network: NetworkBackendClient,
-        commands: mpsc::Sender<ClientCommand>,
         identity: NodeIdentity,
+        shared_global_state: SharedGlobalState,
+        network: NetworkBackendClient,
     ) -> anyhow::Result<()> {
         let this: WebRtc = Default::default();
         loop {
@@ -433,14 +436,14 @@ impl WebRtc {
             tokio::select! {
                 event = webrtc_signaling_receiver.recv() => {
                     if let Some(event) = event {
-                        utils::spawn_and_log_error(this.clone().handle_webrtc_signaling(event, network.clone(), commands.clone(), identity.clone()));
+                        utils::spawn_and_log_error(this.clone().handle_webrtc_signaling(event, identity.clone(), shared_global_state.clone(), network.clone()));
                     } else {
                         log::warn!("None received from webrtc_signaling_receiver")
                     }
                 },
                 event = delegated_streaming_receiver.recv() => {
                     if let Some(event) = event {
-                        utils::spawn_and_log_error(this.clone().handle_delegated_streaming_event(event, network.clone(), commands.clone(), identity.clone()));
+                        utils::spawn_and_log_error(this.clone().handle_delegated_streaming_event(event, identity.clone(), shared_global_state.clone(), network.clone()));
                     } else {
                         log::warn!("None received from delegated_streaming_receiver")
                     }
@@ -520,8 +523,9 @@ async fn track_receiver_loop(
     peer: PeerId,
     peer_state: PeerState,
     mut track_receiver: mpsc::UnboundedReceiver<Arc<TrackRemote>>,
-    commands: mpsc::Sender<ClientCommand>,
     identity: NodeIdentity,
+    shared_global_state: SharedGlobalState,
+    mut network: NetworkBackendClient,
 ) -> anyhow::Result<()> {
     while let Some(t) = track_receiver.recv().await {
         let k = WebRtcTrack {
@@ -561,8 +565,9 @@ async fn track_receiver_loop(
                             publish_stream::publish(
                                 info.clone(),
                                 pending_remote_tracks,
-                                &commands,
                                 identity.clone(),
+                                &shared_global_state,
+                                &mut network,
                             )
                             .await?
                         } else {
