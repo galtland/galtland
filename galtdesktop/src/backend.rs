@@ -49,6 +49,7 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
     let configuration = Configuration {
         disable_streaming: opt.disable_streaming,
         disable_rendezvous_discover: opt.disable_rendezvous_discover,
+        disable_rendezvous_relay: opt.disable_rendezvous_relay,
         disable_rendezvous_register: opt.disable_rendezvous_register,
         max_bytes_per_second_upload_stream: opt.max_bytes_per_second_upload_stream,
         rendezvous_addresses: rendezvous_addresses.clone(),
@@ -59,7 +60,8 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, _webrtc_signaling_receiver) = mpsc::unbounded_channel();
     let (delegated_streaming_sender, _delegated_streaming_receiver) = mpsc::unbounded_channel();
-    let transport = nativecommon::transport::our_transport(identity.keypair.as_ref()).await?;
+    let (transport, relay_client) =
+        nativecommon::transport::our_transport(identity.keypair.as_ref()).await?;
     let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
         configuration.clone(),
         identity.clone(),
@@ -68,6 +70,7 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
         webrtc_signaling_sender,
         delegated_streaming_sender,
         transport,
+        relay_client,
     )
     .await;
 
@@ -144,7 +147,7 @@ pub(crate) async fn start_command(opt: Cli) -> anyhow::Result<()> {
                         Some(e) => protocols::handle_network_backend_command(e, &mut swarm)?,
                         None => todo!(),
                     },
-                    event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &identity, &mut swarm)
+                    event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
                 };
             }
         }

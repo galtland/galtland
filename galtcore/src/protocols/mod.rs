@@ -7,6 +7,7 @@ pub mod gossip;
 pub mod kademlia_record;
 pub mod media_streaming;
 pub mod payment_info;
+pub mod relay_client;
 pub mod relay_server;
 pub mod simple_file_exchange;
 pub mod webrtc_signaling;
@@ -16,6 +17,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
+use itertools::Itertools;
 use kademlia_record::KademliaRecord;
 use libp2p::core::ConnectedPoint;
 use libp2p::identify::{Identify, IdentifyEvent};
@@ -27,12 +29,11 @@ use libp2p::kad::{
     QueryResult,
 };
 // use libp2p::mdns::MdnsEvent;
-use libp2p::relay::v2::relay;
 use libp2p::rendezvous::{self, Cookie, Namespace};
 use libp2p::request_response::{RequestResponse, RequestResponseEvent};
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
-use libp2p::swarm::{DialError, SwarmEvent};
-use libp2p::{dcutr, floodsub, multiaddr, ping, PeerId, Swarm};
+use libp2p::swarm::{AddressScore, DialError, SwarmEvent};
+use libp2p::{dcutr, floodsub, multiaddr, ping, Multiaddr, PeerId, Swarm};
 use log::{debug, info, warn};
 use media_streaming::{StreamingRequest, WrappedStreamingResponseResult};
 use simple_file_exchange::{SimpleFileRequest, SimpleFileResponse};
@@ -340,34 +341,26 @@ pub(crate) fn handle_rendezvous_server(event: rendezvous::server::Event) {
         } => {
             if !registrations.is_empty() {
                 info!(
-                    "Served peer {} with {} registrations",
-                    enquirer,
+                    "rendezvous::server::Event::DiscoverServed {enquirer} with {} registrations",
                     registrations.len()
                 )
             } else {
-                debug!("No registrations available for peer {}", enquirer,)
+                debug!("rendezvous::server::Event::DiscoverServed nothing for peer {enquirer}")
             }
         }
-        rendezvous::server::Event::DiscoverNotServed { enquirer, error } => info!(
-            "rendezvous::server::Event::DiscoverNotServed {}: {:?}",
-            enquirer, error
-        ),
-        rendezvous::server::Event::PeerRegistered {
-            peer,
-            registration: _,
-        } => {
-            info!("rendezvous::server::Event::PeerRegistered {}", peer)
+        rendezvous::server::Event::DiscoverNotServed { enquirer, error } => {
+            info!("rendezvous::server::Event::DiscoverNotServed {enquirer}: {error:?}")
+        }
+        rendezvous::server::Event::PeerRegistered { peer, registration } => {
+            info!("rendezvous::server::Event::PeerRegistered {peer} {registration:?}")
         }
         rendezvous::server::Event::PeerNotRegistered {
             peer,
             namespace: _,
             error,
-        } => info!(
-            "rendezvous::server::Event::PeerNotRegistered {}: {:?}",
-            peer, error
-        ),
-        rendezvous::server::Event::PeerUnregistered { peer, namespace: _ } => {
-            info!("rendezvous::server::Event::PeerUnregistered {}", peer)
+        } => info!("rendezvous::server::Event::PeerNotRegistered {peer}: {error:?}"),
+        rendezvous::server::Event::PeerUnregistered { peer, namespace } => {
+            info!("rendezvous::server::Event::PeerUnregistered {peer} {namespace:?}")
         }
         rendezvous::server::Event::RegistrationExpired(_) => {
             info!("rendezvous::server::Event::RegistrationExpired")
@@ -386,109 +379,103 @@ pub(crate) fn handle_rendezvous_client(
             cookie: new_cookie,
         } => {
             if registrations.is_empty() {
-                debug!("No registrations available")
+                debug!("rendezvous::client::Event::Discovered no registrations on {rendezvous_node} new cookie: {new_cookie:?}")
             }
-            let my_peer_id = *swarm.local_peer_id();
+            if let Some(state) = swarm
+                .behaviour_mut()
+                .state
+                .rendezvous_peers
+                .get_mut(&rendezvous_node)
+            {
+                state
+                    .cookie
+                    .replace(new_cookie);
+            }
 
+            let my_peer_id = *swarm.local_peer_id();
             let mut added_new_peers = false;
             for registration in registrations {
-                if let Some(state) = swarm
-                    .behaviour_mut()
-                    .state
-                    .rendezvous_peers
-                    .get_mut(&rendezvous_node)
-                {
-                    state
-                        .cookies
-                        .insert(registration.namespace, new_cookie.clone());
+                let peer = registration.record.peer_id();
+                let addresses = registration.record.addresses();
+                if addresses.is_empty() {
+                    debug!("rendezvous::client::Event::Discovered No addresses available on {registration:?}")
+                } else {
+                    info!("rendezvous::client::Event::Discovered {peer} with {} addresses", addresses.len());
                 }
-                for address in registration.record.addresses() {
-                    let peer = registration.record.peer_id();
-                    if peer == my_peer_id {
-                        log::trace!("rendezvous::client::Event::Discovered ignoring ourselves");
-                        continue;
+                if peer == my_peer_id {
+                    log::trace!("rendezvous::client::Event::Discovered ignoring ourselves");
+                    continue;
+                }
+                let addresses = addresses.iter().filter_map(|a| utils::canonical_address_for_peer_id(a.clone(), &peer).ok()).collect_vec();
+                match swarm.dial(
+                    DialOpts::peer_id(peer)
+                        .addresses(addresses.clone())
+                        .condition(PeerCondition::NotDialing)
+                        .build()
+                ) {
+                    Ok(_) => {
+                        info!("\tDialing {peer} with {} addresses", addresses.len());
+                        added_new_peers = true;
                     }
-                    log::info!(
-                        "rendezvous::client::Event::Discovered peer {} at {}",
-                        peer,
-                        address
-                    );
-
-                    let address_with_p2p = address
-                        .clone()
-                        .with(multiaddr::Protocol::P2p(*peer.as_ref()));
-
-                    swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer, address_with_p2p);
-
-                    added_new_peers = true;
+                    Err(e) => {
+                        info!("\tFailed to dial {peer}: {e:?}");
+                    }
                 }
+            //     for address in addresses {
+            //         log::info!("rendezvous::client::Event::Discovered peer {peer} at {address}",);
+            //         match utils::canonical_address_with_peer_id(address.clone()
+            //             , &peer){
+            //                 Ok(address_with_p2p) => {
+            //                     // swarm
+            //                     //     .behaviour_mut()
+            //                     //     .kademlia
+            //                     //     .add_address(&peer, address_with_p2p);
+            //                     added_new_peers = true;
+            //                 }
+            //                 Err(e) =>
+            //                 {log::warn!("Error processing address {address}: {e:?}");}
+            //             }
+            //     }
             }
             if added_new_peers {
                 log::debug!("Starting a kademlia bootstrap because new peers have been added");
-                swarm
+                if let Err(e) = swarm
                     .behaviour_mut()
                     .kademlia
-                    .bootstrap()
-                    .expect("to be able to start bootstrap process");
+                    .bootstrap() {
+                        log::warn!("failed to start bootstrap process: {e:?}");
+                    }
             }
         }
         rendezvous::client::Event::DiscoverFailed {
-            rendezvous_node: _,
-            namespace: _,
+            rendezvous_node,
+            namespace,
             error,
-        } => warn!("rendezvous::client::Event::DiscoverFailed {:?}", error),
+        } => warn!("rendezvous::client::Event::DiscoverFailed {rendezvous_node} {namespace:?} {error:?}"),
         rendezvous::client::Event::Registered {
             rendezvous_node,
             ttl,
             namespace,
         } => log::debug!(
-            "Registered for namespace '{}' at rendezvous point {} for the next {} seconds",
-            namespace,
-            rendezvous_node,
-            ttl
+            "rendezvous::client::Event::Registered for namespace '{namespace}' at rendezvous point {rendezvous_node} for the next {ttl} seconds",
         ),
         rendezvous::client::Event::RegisterFailed(e) => {
-            warn!("rendezvous::client::Event::RegisterFailed: {}", e)
+            warn!("rendezvous::client::Event::RegisterFailed: {e}")
         }
         rendezvous::client::Event::Expired { peer } => {
-            info!("rendezvous::client::Event::Expired {}", peer)
+            info!("rendezvous::client::Event::Expired {peer}")
         }
     }
 }
 
-pub(crate) fn handle_identity(
-    event: IdentifyEvent,
-    opt: &Configuration,
-    identity: &NodeIdentity,
-    swarm: &mut Swarm<ComposedBehaviour>,
-) {
+pub(crate) fn handle_identity(event: IdentifyEvent, swarm: &mut Swarm<ComposedBehaviour>) {
     match event {
         IdentifyEvent::Received { peer_id, info } => {
             debug!(
-                "IdentifyEvent::Received from {} our address is {}",
-                peer_id, info.observed_addr
+                "IdentifyEvent::Received from {peer_id} with {} addresses our address is {}",
+                info.listen_addrs.len(),
+                info.observed_addr
             );
-            if !opt.disable_rendezvous_register
-                && swarm
-                    .behaviour()
-                    .state
-                    .rendezvous_peers
-                    .contains_key(&peer_id)
-            {
-                swarm.behaviour_mut().rendezvous_client.register(
-                    rendezvous::Namespace::from_static(DEFAULT_RENDEZVOUS_NAMESPACE),
-                    peer_id,
-                    Some(rendezvous::MIN_TTL),
-                );
-                swarm.behaviour_mut().rendezvous_client.register(
-                    identity.org_namespace.as_ref().to_owned(),
-                    peer_id,
-                    Some(rendezvous::MIN_TTL),
-                );
-            }
             if swarm
                 .behaviour_mut()
                 .broadcast_event_sender
@@ -502,7 +489,7 @@ pub(crate) fn handle_identity(
             }
         }
         IdentifyEvent::Sent { peer_id } => debug!("IdentifyEvent::Sent {}", peer_id),
-        IdentifyEvent::Pushed { peer_id } => info!("IdentifyEvent::Pushed {}", peer_id),
+        IdentifyEvent::Pushed { peer_id } => debug!("IdentifyEvent::Pushed {}", peer_id),
         IdentifyEvent::Error { peer_id, error: _ } => info!("IdentifyEvent::Error {}", peer_id),
     }
 }
@@ -694,7 +681,12 @@ pub fn handle_network_backend_command(
         }
         NetworkBackendCommand::GetSwarmNetworkInfo { sender } => {
             sender
-                .send(swarm.network_info())
+                .send(crate::networkbackendclient::NetworkInfos {
+                    info: swarm.network_info(),
+                    external_addresses: swarm.external_addresses().cloned().collect_vec(),
+                    connected_peers: swarm.connected_peers().copied().collect_vec(),
+                    listen_addresses: swarm.listeners().cloned().collect_vec(),
+                })
                 .map_err(utils::send_error)?;
         }
         NetworkBackendCommand::PublishGossip {
@@ -800,21 +792,21 @@ pub fn handle_network_backend_command(
 pub fn handle_swarm_event<E: std::fmt::Debug>(
     event: SwarmEvent<ComposedEvent, E>,
     opt: &Configuration,
-    identity: &NodeIdentity,
     swarm: &mut Swarm<ComposedBehaviour>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
-            info!("SwarmEvent::NewListenAddr {}", address);
+            info!("SwarmEvent::NewListenAddr {address}");
+            if address.iter().any(|p| p == multiaddr::Protocol::P2pCircuit) {
+                // Let relay address be available on next infos
+                swarm.add_external_address(address, AddressScore::Finite(1));
+            }
         }
         SwarmEvent::IncomingConnection {
             local_addr,
             send_back_addr,
         } => {
-            info!(
-                "SwarmEvent::IncomingConnection {} {}",
-                local_addr, send_back_addr
-            );
+            info!("SwarmEvent::IncomingConnection {local_addr} {send_back_addr}");
         }
         SwarmEvent::IncomingConnectionError {
             local_addr,
@@ -833,24 +825,29 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             concurrent_dial_errors: _,
         } => {
             info!(
-                "SwarmEvent::ConnectionEstablished {} at {:?} (num_established: {num_established:?})",
-                peer_id, endpoint
+                "SwarmEvent::ConnectionEstablished {peer_id} at {endpoint:?} (num_established: {num_established:?})"
             );
             match &endpoint {
                 ConnectedPoint::Dialer {
                     address,
                     role_override: _,
-                } => {
-                    swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, address.clone());
-                }
-                ConnectedPoint::Listener { send_back_addr, .. } => {
-                    swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, send_back_addr.clone());
+                } => match utils::canonical_address_for_peer_id(address.clone(), &peer_id) {
+                    Ok(address) => {
+                        swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, address);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to add address {address}: {e:?}")
+                    }
+                },
+                ConnectedPoint::Listener { .. } => {
+                    // FIXME: do something here?
+                    // swarm
+                    //     .behaviour_mut()
+                    //     .kademlia
+                    //     .add_address(&peer_id, send_back_addr.clone());
                 }
             };
             // log::debug!("    Starting a kademlia bootstrap because connected to a new peer");
@@ -860,21 +857,8 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             //     .bootstrap()
             //     .expect("to be able to start bootstrap process");
 
+
             if !opt.disable_rendezvous_discover {
-                swarm.behaviour_mut().rendezvous_client.discover(
-                    Some(rendezvous::Namespace::from_static(
-                        DEFAULT_RENDEZVOUS_NAMESPACE,
-                    )),
-                    None,
-                    None,
-                    peer_id,
-                );
-                swarm.behaviour_mut().rendezvous_client.discover(
-                    Some(identity.org_namespace.as_ref().to_owned()),
-                    None,
-                    None,
-                    peer_id,
-                );
                 let endpoint = endpoint.get_remote_address();
                 if opt.rendezvous_addresses.contains(endpoint) {
                     log::info!(
@@ -886,7 +870,7 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
                         .behaviour_mut()
                         .state
                         .rendezvous_peers
-                        .insert(peer_id, Default::default());
+                        .insert(peer_id, RendezvousState::default());
                 }
 
                 if swarm
@@ -937,16 +921,17 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
             // ComposedEvent::Mdns(event) => handle_mdns_event(event, swarm),
             ComposedEvent::RendezvousServer(event) => handle_rendezvous_server(event),
             ComposedEvent::RendezvousClient(event) => handle_rendezvous_client(event, swarm),
-            ComposedEvent::Identify(event) => handle_identity(event, opt, identity, swarm),
+            ComposedEvent::Identify(event) => handle_identity(event, swarm),
             ComposedEvent::Ping(event) => handle_ping(event, swarm),
             ComposedEvent::Gossip(event) => gossip::handle_gossip(event, swarm),
-            ComposedEvent::Relay(event) => relay_server::handle(event, swarm),
+            ComposedEvent::RelayClient(event) => relay_client::handle(event, swarm),
+            ComposedEvent::RelayServer(event) => relay_server::handle(event, swarm),
             ComposedEvent::Dcutr(event) => dcutr_behaviour::handle(event, swarm),
             ComposedEvent::WebRtcSignaling(event) => webrtc_signaling::handle_event(event, swarm),
             ComposedEvent::DelegatedStreaming(event) => {
                 delegated_streaming::handle_event(event, swarm)
             }
-            ComposedEvent::GaltIdentify(event) => galt_identify::handle_event(event, swarm),
+            ComposedEvent::GaltIdentify(event) => galt_identify::handle_event(event, opt, swarm),
         },
         SwarmEvent::BannedPeer { peer_id, endpoint } => {
             info!("SwarmEvent::BannedPeer {} at {:?}", peer_id, endpoint);
@@ -980,40 +965,50 @@ pub fn handle_swarm_event<E: std::fmt::Debug>(
 }
 
 pub fn handle_discover_tick(opt: &Configuration, swarm: &mut Swarm<ComposedBehaviour>) {
-    if !opt.disable_rendezvous_discover {
-        let has_any = swarm
-            .behaviour()
-            .state
-            .rendezvous_peers
-            .values()
-            .any(|v| !v.cookies.is_empty());
-        if has_any {
-            let rendezvous_peers = swarm.behaviour().state.rendezvous_peers.clone();
-            for (peer, state) in rendezvous_peers {
-                for (namespace, cookie) in state.cookies {
-                    if swarm.is_connected(&peer) {
-                        log::debug!(
-                            "handle_discover_tick rendezvous_client.discover {cookie:?} {peer}"
-                        );
-                        swarm.behaviour_mut().rendezvous_client.discover(
-                            Some(namespace),
-                            Some(cookie),
-                            None,
-                            peer,
-                        );
+    let rendezvous_peers = swarm.behaviour().state.rendezvous_peers.clone();
+    for (peer, state) in rendezvous_peers {
+        if swarm.is_connected(&peer) {
+            let cookie = state.cookie;
+            log::debug!("handle_discover_tick discover {cookie:?} {peer}");
+            swarm
+                .behaviour_mut()
+                .rendezvous_client
+                .discover(None, cookie, None, peer);
+            if !opt.disable_rendezvous_register {
+                log::debug!(
+                    "\thandle_discover_tick register {peer} {:?}",
+                    swarm.external_addresses().collect_vec()
+                );
+                swarm.behaviour_mut().rendezvous_client.register(
+                    Namespace::from_static(DEFAULT_RENDEZVOUS_NAMESPACE),
+                    peer,
+                    Some(rendezvous::MIN_TTL),
+                );
+            }
+        } else {
+            match swarm.dial(peer) {
+                Ok(_) => log::info!("(re)dialing rendezvous {peer}"),
+                Err(DialError::NoAddresses) => {
+                    if state.addresses.is_empty() {
+                        log::warn!(
+                            "Error (re)dialing rendezvous {peer}: no addresses found anywhere"
+                        )
                     } else {
-                        match swarm.dial(peer) {
-                            Ok(_) => log::info!("(re)dialing rendezvous {peer}"),
-                            Err(e) => log::warn!("Error (re)dialing rendezvous {peer}: {e}"),
-                            //TODO: perhaps find new rendezvous
+                        match swarm.dial(
+                            DialOpts::peer_id(peer)
+                                .addresses(state.addresses.clone())
+                                .condition(PeerCondition::NotDialing)
+                                .override_dial_concurrency_factor(1u8.try_into().unwrap())
+                                .build())
+                            {
+                            Ok(_) => log::info!("(re)dialing rendezvous {peer} with reset addresses"),
+                            Err(e) => log::warn!("Error (re)dialing rendezvous {peer} with reset addresses {:?}: {e}", state.addresses),
                         }
                     }
                 }
+                Err(e) => log::warn!("Error (re)dialing rendezvous {peer}: {e}"),
+                //TODO: perhaps find new rendezvous
             }
-        } else {
-            let data = &swarm.behaviour().state.rendezvous_peers;
-            log::debug!("handle_discover_tick got empty {data:?}");
-            //TODO: perhaps (re)dial original address or find new rendezvous
         }
     }
 }
@@ -1048,7 +1043,8 @@ pub enum ComposedEvent {
     RendezvousClient(rendezvous::client::Event),
     // Gossip(gossipsub::GossipsubEvent),
     Gossip(floodsub::FloodsubEvent),
-    Relay(relay::Event),
+    RelayServer(libp2p::relay::v2::relay::Event),
+    RelayClient(libp2p::relay::v2::client::Event),
     Dcutr(dcutr::behaviour::Event),
 }
 
@@ -1144,9 +1140,15 @@ impl From<floodsub::FloodsubEvent> for ComposedEvent {
     }
 }
 
-impl From<relay::Event> for ComposedEvent {
-    fn from(event: relay::Event) -> Self {
-        ComposedEvent::Relay(event)
+impl From<libp2p::relay::v2::relay::Event> for ComposedEvent {
+    fn from(event: libp2p::relay::v2::relay::Event) -> Self {
+        ComposedEvent::RelayServer(event)
+    }
+}
+
+impl From<libp2p::relay::v2::client::Event> for ComposedEvent {
+    fn from(event: libp2p::relay::v2::client::Event) -> Self {
+        ComposedEvent::RelayClient(event)
     }
 }
 
@@ -1158,7 +1160,8 @@ impl From<dcutr::behaviour::Event> for ComposedEvent {
 
 #[derive(Default, Debug, Clone)]
 pub struct RendezvousState {
-    cookies: HashMap<Namespace, Cookie>,
+    addresses: Vec<Multiaddr>,
+    cookie: Option<Cookie>,
 }
 
 #[derive(Default)]
@@ -1228,7 +1231,8 @@ pub struct ComposedBehaviour {
     pub rendezvous_client: rendezvous::client::Behaviour,
     // pub gossip: gossipsub::Gossipsub,
     pub gossip: floodsub::Floodsub,
-    pub relay_server: relay::Relay,
+    pub relay_server: libp2p::relay::v2::relay::Relay,
+    pub relay_client: libp2p::relay::v2::client::Client,
     pub dcutr: dcutr::behaviour::Behaviour,
     #[behaviour(ignore)]
     pub state: NetworkState,
@@ -1248,20 +1252,20 @@ pub struct NodeIdentity {
     pub peer_id: PeerId,
     pub org: GaltOrganization,
     pub org_keypair: Arc<Keypair>,
-    pub org_namespace: Arc<Namespace>,
+    // pub org_namespace: Arc<Namespace>,
     pub org_sig: Bytes,
 }
 
 impl NodeIdentity {
     pub fn new(keypair: Keypair, org_keypair: Keypair) -> anyhow::Result<Self> {
         let peer_id = keypair.public().to_peer_id();
-        let org_namespace = Namespace::new(org_keypair.public().to_peer_id().to_base58())?;
+        // let org_namespace = Namespace::new(org_keypair.public().to_peer_id().to_base58())?;
         let org_sig = org_keypair.sign(&peer_id.to_bytes())?;
         Ok(Self {
             keypair: Arc::new(keypair),
             org: GaltOrganization::new(org_keypair.public()),
             org_keypair: Arc::new(org_keypair),
-            org_namespace: Arc::new(org_namespace),
+            // org_namespace: Arc::new(org_namespace),
             peer_id,
             org_sig: org_sig.into(),
         })

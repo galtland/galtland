@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use libp2p::kad::record::Key;
 use libp2p::request_response::ResponseChannel;
-use libp2p::swarm::{DialError, NetworkInfo};
+use libp2p::swarm::{AddressRecord, DialError, NetworkInfo};
 use libp2p::{floodsub, Multiaddr, PeerId};
 use tokio::sync::{mpsc, oneshot};
 
@@ -126,13 +126,20 @@ pub enum NetworkBackendCommand {
         channel: ResponseChannel<GaltIdentifyResponseResult>,
     },
     GetSwarmNetworkInfo {
-        sender: oneshot::Sender<NetworkInfo>,
+        sender: oneshot::Sender<NetworkInfos>,
     },
     Dial {
         peer: PeerId,
         addresses: Vec<Multiaddr>,
         sender: oneshot::Sender<Result<(), DialError>>,
     },
+}
+
+pub struct NetworkInfos {
+    pub info: NetworkInfo,
+    pub external_addresses: Vec<AddressRecord>,
+    pub connected_peers: Vec<PeerId>,
+    pub listen_addresses: Vec<Multiaddr>,
 }
 
 #[derive(Debug)]
@@ -480,7 +487,7 @@ impl NetworkBackendClient {
         Ok(())
     }
 
-    pub async fn get_swarm_network_info(&self) -> anyhow::Result<NetworkInfo> {
+    pub async fn get_swarm_network_infos(&self) -> anyhow::Result<NetworkInfos> {
         log::debug!("get_swarm_network_info");
         let (sender, receiver) = oneshot::channel();
         self.sender

@@ -9,6 +9,7 @@ use crate::protocols::galt_identify::{
     GaltIdentifyInfo, GaltIdentifyRequest, GaltIdentifyResponse, KnownPeer,
 };
 use crate::protocols::NodeIdentity;
+use crate::utils;
 
 pub async fn handle_respond(
     identity: &NodeIdentity,
@@ -18,35 +19,41 @@ pub async fn handle_respond(
 ) -> anyhow::Result<()> {
     match request.request {
         GaltIdentifyRequest::OfferInfo(info) => {
-            let peer = request.peer;
-            if !info.verify_sig(&peer) {
+            let peer = &request.peer;
+            if !info.verify_sig(peer) {
                 let message = "Invalid org signature".to_string();
                 network
                     .respond_galt_identify(Err(message.clone()), request.channel)
                     .await?;
                 anyhow::bail!("{message}");
             }
+
             let mut new_connections = Vec::new();
             {
                 let mut peer_control = shared_state.peer_control.lock().await;
                 if info.org == identity.org {
                     // peer from our org
                     for k in info.our_org_peers {
-                        if k.listen_addresses.is_empty() {
+                        let k = k.canonicalize();
+                        let kpeer = k.peer;
+                        if k.external_addresses.is_empty() {
                             log::warn!(
-                                "Ignoring our peer {} because there are no listen addresses",
-                                k.peer
+                                "Ignoring our peer {kpeer} because there are no listen addresses"
                             );
                         } else {
-                            peer_control.add_our_org_peer(k.clone());
-                            log::info!("Dialing our org peer {}", k.peer);
-                            new_connections.push(network.dial(k.peer, k.listen_addresses));
+                            log::info!("Dialing our org peer {kpeer}");
+                            new_connections.push(network.dial(kpeer, k.external_addresses.clone()));
+                            peer_control.add_our_org_peer(k);
                         }
                     }
                 } else {
-                    peer_control.add_org_peers(&info.our_org_peers, info.org.clone());
+                    peer_control.add_org_peers(
+                        info.our_org_peers.into_iter().map(|p| p.canonicalize()),
+                        info.org.clone(),
+                    );
                 }
-                peer_control.add_peer_org(peer, info.org);
+                peer_control.add_peer_org(*peer, info.org);
+                peer_control.add_external_address(*peer, info.external_addresses);
             }
             if network
                 .respond_galt_identify(Ok(GaltIdentifyResponse {}), request.channel)
@@ -86,7 +93,7 @@ pub(crate) async fn handle_establish_with_peer(
                 .iter()
                 .filter(|(_, s)| {
                     s.latency.is_some() // we only share the peers that are currently connected
-                        && s.identify_info.is_some()
+                        && !s.external_addresses.is_empty()
                         &&s.org.is_some() && s.org.as_ref() != Some(&identity.org)
                 })
                 .collect_vec();
@@ -95,11 +102,7 @@ pub(crate) async fn handle_establish_with_peer(
                 .into_iter()
                 .map(|(peer, stats)| KnownPeer {
                     peer: *peer,
-                    listen_addresses: stats
-                        .identify_info
-                        .as_ref()
-                        .map(|i| i.listen_addrs.clone())
-                        .unwrap(),
+                    external_addresses: stats.external_addresses.clone(),
                 })
                 .take(crate::protocols::galt_identify::MAX_SHARED_PEERS_PER_LIST)
                 .collect_vec()
@@ -108,23 +111,47 @@ pub(crate) async fn handle_establish_with_peer(
             let mut peers = peer_control
                 .peer_statistics
                 .iter()
-                .filter(|(_, s)| s.identify_info.is_some() && s.org.as_ref() == Some(&identity.org))
+                .filter(|(_, s)| {
+                    !s.external_addresses.is_empty() && s.org.as_ref() == Some(&identity.org)
+                })
                 .collect_vec();
             peers.sort_by_key(|(_, s)| s.latency.unwrap_or(Duration::MAX));
             peers
                 .into_iter()
                 .map(|(peer, stats)| KnownPeer {
                     peer: *peer,
-                    listen_addresses: stats
-                        .identify_info
-                        .as_ref()
-                        .map(|i| i.listen_addrs.clone())
-                        .unwrap(),
+                    external_addresses: stats.external_addresses.clone(),
                 })
                 .take(crate::protocols::galt_identify::MAX_SHARED_PEERS_PER_LIST)
                 .collect_vec()
         };
+        let network_info = network.get_swarm_network_infos().await?;
+        let mut external_addresses = network_info
+            .external_addresses
+            .iter()
+            .filter_map(|e| {
+                utils::canonical_address_for_peer_id(e.addr.clone(), &identity.peer_id)
+                    .map(|addr| (e.score, addr))
+                    .ok() // remove bad addresses
+            })
+            .collect_vec();
+        // high score first
+        external_addresses.sort_by(|a, b| b.cmp(a));
+        let mut external_addresses = external_addresses
+            .into_iter()
+            .map(|(_, addr)| addr)
+            .dedup()
+            .take(crate::protocols::galt_identify::MAX_SHARED_ADDRESSES_PER_PEER) // get best addresses
+            .collect_vec();
+        if external_addresses.is_empty() {
+            log::info!(
+                "Fallbacking to send listen addresses because no external address is known (yet)"
+            );
+            external_addresses.extend(network_info.listen_addresses);
+        }
+        log::debug!("Sending external addresses: {external_addresses:?}");
         GaltIdentifyInfo {
+            external_addresses,
             our_org_peers,
             org: identity.org.clone(),
             our_org_sig: identity.org_sig.to_vec(),

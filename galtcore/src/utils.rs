@@ -4,6 +4,8 @@ use std::io;
 use std::string::FromUtf8Error;
 
 use bytes::BytesMut;
+use itertools::Itertools;
+use libp2p::{multiaddr, Multiaddr, PeerId};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, BufReader};
 
@@ -147,4 +149,112 @@ pub fn measure_noop<F: FnOnce() -> R, R>(_prefix: &str, block: F) -> R {
 
 pub fn send_error<E>(_: E) -> anyhow::Error {
     anyhow::anyhow!("expected receiver to not be dropped")
+}
+
+
+pub fn canonical_address_for_peer_id(mut m: Multiaddr, p: &PeerId) -> anyhow::Result<Multiaddr> {
+    if matches!(m.iter().next(), Some(multiaddr::Protocol::P2p(_))) {
+        anyhow::bail!("Address beginning with p2p");
+    }
+
+    let mut last = m.pop();
+
+    while last.is_some() && matches!(last, Some(multiaddr::Protocol::P2p(_))) {
+        last = m.pop();
+    }
+
+    if last.is_none() {
+        anyhow::bail!("Address is too short")
+    }
+
+    Ok(m.with(last.unwrap())
+        .with(multiaddr::Protocol::P2p(*p.as_ref())))
+}
+
+
+pub fn canonicalize_addresses(
+    addresses: impl Iterator<Item = Multiaddr>,
+    p: &PeerId,
+) -> Vec<Multiaddr> {
+    addresses
+        .filter_map(|a| canonical_address_for_peer_id(a, p).ok())
+        .dedup()
+        .collect_vec()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use libp2p::multiaddr::Protocol;
+
+    use super::*;
+
+    #[test]
+    fn test_canonical_address_with_peer_id() -> anyhow::Result<()> {
+        let p1 = PeerId::random();
+        let p2 = PeerId::random();
+        let p3 = PeerId::random();
+
+        let base = Multiaddr::empty()
+            .with(Protocol::from(Ipv4Addr::UNSPECIFIED))
+            .with(Protocol::Tcp(1234));
+
+
+        assert_eq!(
+            base.clone().with(Protocol::P2p(*p1.as_ref())),
+            canonical_address_for_peer_id(base.clone(), &p1)?
+        );
+
+
+        assert_eq!(
+            base.clone().with(Protocol::P2p(*p2.as_ref())),
+            canonical_address_for_peer_id(base.clone().with(Protocol::P2p(*p1.as_ref())), &p2)?
+        );
+
+        assert_eq!(
+            base.clone().with(Protocol::P2p(*p3.as_ref())),
+            canonical_address_for_peer_id(
+                base.clone()
+                    .with(Protocol::P2p(*p1.as_ref()))
+                    .with(Protocol::P2p(*p2.as_ref())),
+                &p3
+            )?
+        );
+
+        assert_eq!(
+            base.clone()
+                .with(Protocol::P2p(*p1.as_ref()))
+                .with(Protocol::P2pCircuit)
+                .with(Protocol::P2p(*p2.as_ref())),
+            canonical_address_for_peer_id(
+                base.clone()
+                    .with(Protocol::P2p(*p1.as_ref()))
+                    .with(Protocol::P2pCircuit),
+                &p2
+            )?
+        );
+
+        assert_eq!(
+            base.clone()
+                .with(Protocol::P2p(*p1.as_ref()))
+                .with(Protocol::P2pCircuit)
+                .with(Protocol::P2p(*p3.as_ref())),
+            canonical_address_for_peer_id(
+                base.with(Protocol::P2p(*p1.as_ref()))
+                    .with(Protocol::P2pCircuit)
+                    .with(Protocol::P2p(*p2.as_ref())),
+                &p3
+            )?
+        );
+
+        assert!(canonical_address_for_peer_id(
+            Multiaddr::empty().with(Protocol::P2p(*p1.as_ref())),
+            &p1
+        )
+        .is_err());
+
+        Ok(())
+    }
 }

@@ -74,6 +74,7 @@ async fn start_command(
     let configuration = Configuration {
         disable_streaming: opt.disable_streaming,
         disable_rendezvous_discover: opt.disable_rendezvous_discover,
+        disable_rendezvous_relay: opt.disable_rendezvous_relay,
         disable_rendezvous_register: opt.disable_rendezvous_register,
         max_bytes_per_second_upload_stream: opt.max_bytes_per_second_upload_stream,
         rendezvous_addresses: rendezvous_addresses.clone(),
@@ -84,7 +85,8 @@ async fn start_command(
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, webrtc_signaling_receiver) = mpsc::unbounded_channel();
     let (delegated_streaming_sender, delegated_streaming_receiver) = mpsc::unbounded_channel();
-    let transport = nativecommon::transport::our_transport(identity.keypair.as_ref()).await?;
+    let (transport, relay_client) =
+        nativecommon::transport::our_transport(identity.keypair.as_ref()).await?;
     let mut swarm: libp2p::Swarm<protocols::ComposedBehaviour> = galtcore::swarm::build(
         configuration.clone(),
         identity.clone(),
@@ -93,6 +95,7 @@ async fn start_command(
         webrtc_signaling_sender,
         delegated_streaming_sender,
         transport,
+        relay_client,
     )
     .await;
 
@@ -197,7 +200,12 @@ async fn start_command(
         networkbackendclient.clone(),
     ));
 
-    let mut discover_tick = tokio::time::interval(Duration::from_secs(30));
+
+    let mut discover_tick = {
+        let start = tokio::time::Instant::now() + Duration::from_secs(5);
+        tokio::time::interval_at(start, Duration::from_secs(60))
+    };
+
     loop {
         log::trace!("Looping main loop");
         tokio::task::yield_now().await;
@@ -209,7 +217,7 @@ async fn start_command(
                 Some(e) => protocols::handle_network_backend_command(e, &mut swarm)?,
                 None => todo!(),
             },
-            event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &identity, &mut swarm)
+            event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
         };
     }
 }
@@ -362,6 +370,9 @@ struct StartOpt {
 
     #[clap(long)]
     disable_rendezvous_discover: bool,
+
+    #[clap(long)]
+    disable_rendezvous_relay: bool,
 
     #[clap(long)]
     rendezvous_addresses: Vec<Multiaddr>,

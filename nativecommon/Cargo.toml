@@ -9,7 +9,7 @@ edition = "2021"
 galtcore = { path="../galtcore" }
 
 anyhow = "1.0.55"
-libp2p = { version = "0.43", features = [
+libp2p = { version = "0.44", features = [
     "dns-tokio",
     # "mdns",
     "tcp-tokio",
