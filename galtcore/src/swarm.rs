@@ -6,6 +6,7 @@ use std::time::Duration;
 use libp2p::identify::{Identify, IdentifyConfig};
 use libp2p::kad::store::MemoryStore;
 use libp2p::kad::{Kademlia, KademliaConfig, KademliaStoreInserts};
+use libp2p::relay::v2::client::Client;
 use libp2p::relay::v2::relay;
 use libp2p::rendezvous::{self};
 use libp2p::request_response::{ProtocolSupport, RequestResponse, RequestResponseConfig};
@@ -37,6 +38,7 @@ pub async fn build(
         delegated_streaming::RequestEvent,
     >,
     transport: OurTransport,
+    relay_client: Client,
 ) -> Swarm<ComposedBehaviour> {
     let my_peer_id = identity.peer_id;
 
@@ -119,10 +121,10 @@ pub async fn build(
                 MemoryStore::new(my_peer_id),
                 kademlia_config,
             ),
-            identify: Identify::new(IdentifyConfig::new(
-                "galtland/1.0.0".to_string(),
-                identity.keypair.public(),
-            )),
+            identify: Identify::new(
+                IdentifyConfig::new("galtland/1.0.0".to_string(), identity.keypair.public())
+                    .with_push_listen_addr_updates(false),
+            ),
             ping: ping::Behaviour::new(ping::Config::new().with_keep_alive(true)),
             rendezvous_server: rendezvous::server::Behaviour::new(
                 rendezvous::server::Config::default(),
@@ -138,11 +140,13 @@ pub async fn build(
             broadcast_event_sender,
             webrtc_signaling_sender,
             delegated_streaming_sender,
+            relay_client,
         },
         my_peer_id,
     )
     .executor(Box::new(|fut| {
         utils::spawn(fut);
     }))
+    .dial_concurrency_factor(10_u8.try_into().unwrap())
     .build()
 }

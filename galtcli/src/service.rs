@@ -153,7 +153,10 @@ impl sm::service_server::Service for Service {
         _: Request<sm::GetNetworkInfoRequest>,
     ) -> Result<Response<sm::GetNetworkInfoResponse>, Status> {
         let network = self.network.clone();
-        let swarm_info = network.get_swarm_network_info().await;
+        let swarm_infos = network
+            .get_swarm_network_infos()
+            .await
+            .map_err(|e| Status::unknown(e.to_string()))?;
         let gossip_info = self.gossip_listener_client.get_streaming_records().await;
         let peer_id = self.identity.peer_id;
         let org = &self.identity.org;
@@ -172,7 +175,19 @@ impl sm::service_server::Service for Service {
         let format_output = || -> anyhow::Result<String> {
             let mut s = String::new();
             writeln!(s, "{org:?}\n")?;
-            writeln!(s, "\n{:?}\n", swarm_info)?;
+            writeln!(s, "\nInfo:\n{:?}", swarm_infos.info)?;
+            writeln!(s, "\nListen addresses:")?;
+            for address in swarm_infos.listen_addresses {
+                writeln!(s, "\t- {address}")?;
+            }
+            writeln!(s, "\nExternal addresses:")?;
+            for address in swarm_infos.external_addresses {
+                writeln!(s, "\t- {address:?}")?;
+            }
+            writeln!(s, "\nConnected peers:")?;
+            for peer in swarm_infos.connected_peers {
+                writeln!(s, "\t- {peer:?}")?;
+            }
             if gossip_info.is_empty() {
                 writeln!(s, "\nNo records gathered so far\n")?;
             } else {
@@ -219,7 +234,7 @@ impl sm::service_server::Service for Service {
             if !peer_statistics.is_empty() {
                 writeln!(s, "\tPeer statistics:")?;
                 for (p, stats) in peer_statistics {
-                    writeln!(s, "\t\t- {p:?}: {stats}")?;
+                    writeln!(s, "\t\t- {p:?}: {stats:?}")?;
                 }
             }
 

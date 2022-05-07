@@ -44,6 +44,7 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
     let configuration = Configuration {
         disable_streaming: true,
         disable_rendezvous_register: true,
+        disable_rendezvous_relay: true,
         disable_rendezvous_discover: false,
         max_bytes_per_second_upload_stream: None,
         rendezvous_addresses: rendezvous_addresses.clone(),
@@ -53,7 +54,8 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
     let networkbackendclient =
         networkbackendclient::NetworkBackendClient::new(network_backend_command_sender);
 
-    let transport = transport::our_transport(identity.keypair.as_ref()).expect("to build protocol");
+    let (transport, relay_client) =
+        transport::our_transport(identity.keypair.as_ref()).expect("to build protocol");
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let (broadcast_event_sender, broadcast_event_receiver) = broadcast::channel(10);
     let (webrtc_signaling_sender, webrtc_signaling_receiver) = mpsc::unbounded_channel();
@@ -70,6 +72,7 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
         webrtc_signaling_sender,
         delegated_streaming_sender,
         transport,
+        relay_client,
     )
     .await;
 
@@ -139,7 +142,7 @@ pub(crate) async fn start_websockets<F: 'static + FnMut(ConnectionStatusUpdate)>
                     Some(e) => protocols::handle_network_backend_command(e, &mut swarm).expect("to handle command"),
                     None => todo!(),
                 },
-                event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &identity, &mut swarm)
+                event = swarm.select_next_some() => protocols::handle_swarm_event(event, &configuration, &mut swarm)
             };
         }
     });

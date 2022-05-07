@@ -153,13 +153,7 @@ async fn handle_broadcast_network_event(
                 .await
                 .add_ping_info(peer, rtt);
         }
-        BroadcastableNetworkEvent::IdentifyInfo { peer, info } => {
-            shared_global_state
-                .peer_control
-                .lock()
-                .await
-                .add_identify_info(peer, info);
-        }
+        BroadcastableNetworkEvent::IdentifyInfo { .. } => {}
     };
     Ok(())
 }

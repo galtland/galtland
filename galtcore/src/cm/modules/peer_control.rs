@@ -2,8 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use itertools::Itertools;
-use libp2p::identify::IdentifyInfo;
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 
 use crate::protocols::galt_identify::{GaltOrganization, KnownPeer, KnownPeerAddresses};
 use crate::protocols::media_streaming::{StreamSeekType, StreamingKey, StreamingRequest};
@@ -12,17 +11,27 @@ use crate::protocols::media_streaming::{StreamSeekType, StreamingKey, StreamingR
 #[derive(Clone, Default)]
 pub struct PeerStatistics {
     pub latency: Option<Duration>,
-    pub identify_info: Option<IdentifyInfo>,
+    pub external_addresses: Vec<Multiaddr>,
     pub org: Option<GaltOrganization>,
 }
+
+impl std::fmt::Debug for PeerStatistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "Latency: {:?}, org: {:?}, external addresses: {:?}",
+            self.latency, self.org, self.external_addresses
+        ))
+    }
+}
+
 
 impl std::fmt::Display for PeerStatistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
-            "Latency: {:?}, org: {:?}, listen addresses count: {:?}",
+            "Latency: {:?}, org: {:?}, external addresses count: {:?}",
             self.latency,
             self.org,
-            self.identify_info.as_ref().map(|i| i.listen_addrs.len())
+            self.external_addresses.len()
         ))
     }
 }
@@ -151,23 +160,29 @@ impl PeerControl {
     }
 
     pub(crate) fn add_our_org_peer(&mut self, k: KnownPeer) {
-        self.our_org_peers.insert(k.peer, k.listen_addresses);
+        self.our_org_peers.insert(k.peer, k.external_addresses);
     }
 
-    pub(crate) fn add_org_peers(&mut self, known_peers: &[KnownPeer], org: GaltOrganization) {
-        self.other_orgs_peers.entry(org).or_default().extend(
-            known_peers
-                .iter()
-                .map(|k| (k.peer, k.listen_addresses.to_owned())),
-        );
+    pub(crate) fn add_org_peers(
+        &mut self,
+        known_peers: impl Iterator<Item = KnownPeer>,
+        org: GaltOrganization,
+    ) {
+        self.other_orgs_peers
+            .entry(org)
+            .or_default()
+            .extend(known_peers.map(|k| (k.peer, k.external_addresses.to_owned())));
     }
 
     pub(crate) fn add_ping_info(&mut self, p: PeerId, rtt: Option<Duration>) {
         self.peer_statistics.entry(p).or_default().latency = rtt;
     }
 
-    pub(crate) fn add_identify_info(&mut self, p: PeerId, info: IdentifyInfo) {
-        self.peer_statistics.entry(p).or_default().identify_info = Some(info);
+    pub(crate) fn add_external_address(&mut self, p: PeerId, external_addresses: Vec<Multiaddr>) {
+        self.peer_statistics
+            .entry(p)
+            .or_default()
+            .external_addresses = external_addresses;
     }
 
     pub(crate) fn add_peer_org(&mut self, p: PeerId, org: GaltOrganization) {

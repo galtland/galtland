@@ -50,6 +50,9 @@ pub struct Cli {
     disable_rendezvous_discover: bool,
 
     #[clap(long)]
+    disable_rendezvous_relay: bool,
+
+    #[clap(long)]
     rendezvous_addresses: Vec<Multiaddr>,
 
     #[clap(long)]
