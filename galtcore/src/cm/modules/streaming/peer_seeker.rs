@@ -19,7 +19,7 @@ use crate::protocols::media_streaming::{
 use crate::protocols::NodeIdentity;
 use crate::utils::{self, spawn_and_log_error, ArcMutex};
 
-pub(crate) fn launch_daemon(
+pub(super) fn launch_daemon(
     identity: NodeIdentity,
     shared_global_state: SharedGlobalState,
     network: NetworkBackendClient,
@@ -42,7 +42,7 @@ pub(crate) fn launch_daemon(
     (handle, PeerSeekerClient { sender })
 }
 
-pub struct PeerSeekerClient {
+pub(super) struct PeerSeekerClient {
     sender: mpsc::Sender<SeekerCommands>,
 }
 

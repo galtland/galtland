@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::gossip_listener::GossipListenerClient;
 use crate::cm::modules::payment_info::RespondPaymentInfo;
 use crate::cm::modules::simple_file::RespondSimpleFileInfo;
-use crate::cm::modules::streaming::handlers::RespondStreamingInfo;
+use crate::cm::modules::streaming::RespondStreamingInfo;
 use crate::cm::{self, SentStreamingResponseStats, SharedGlobalState};
 use crate::configuration::Configuration;
 use crate::networkbackendclient::NetworkBackendClient;
@@ -196,14 +196,8 @@ async fn handle_internal_network_event(
                 request,
                 channel,
             };
-            cm::modules::streaming::handlers::respond(
-                opt,
-                identity,
-                shared_state_global,
-                network,
-                info,
-            )
-            .await?;
+            cm::modules::streaming::respond(opt, identity, shared_state_global, network, info)
+                .await?;
         }
         InternalNetworkEvent::InboundPaymentInfoRequest {
             peer,

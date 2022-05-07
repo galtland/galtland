@@ -19,7 +19,7 @@ use crate::protocols::media_streaming::{
 use crate::protocols::NodeIdentity;
 use crate::utils;
 
-pub(crate) async fn launch_daemon(
+pub(super) async fn launch_daemon(
     identity: NodeIdentity,
     streaming_key: StreamingKey,
     sender: oneshot::Sender<anyhow::Result<StreamPublisherClient>>,

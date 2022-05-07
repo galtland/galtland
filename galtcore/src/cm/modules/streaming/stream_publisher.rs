@@ -391,7 +391,7 @@ async fn publisher_publish(
     Ok(())
 }
 
-pub(crate) async fn launch_daemon(
+pub(super) async fn launch_daemon(
     streaming_key: StreamingKey,
     shared_state: SharedGlobalState,
     network: NetworkBackendClient,

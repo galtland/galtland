@@ -6,8 +6,8 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use galtcore::cm::modules::streaming::handlers::{PlayStreamInfo, PublishStreamInfo};
 use galtcore::cm::modules::streaming::stream_publisher::StreamPublisherClient;
+use galtcore::cm::modules::streaming::{PlayStreamInfo, PublishStreamInfo};
 use galtcore::cm::{self, SharedGlobalState};
 use galtcore::networkbackendclient::NetworkBackendClient;
 use galtcore::protocols::kademlia_record::StreamingRecord;
@@ -300,7 +300,7 @@ async fn connection_loop(
                             &streaming_key,
                             SystemTime::now().into(),
                         )?;
-                        if cm::modules::streaming::handlers::publish(
+                        if cm::modules::streaming::publish(
                             &shared_global_state,
                             &mut network,
                             PublishStreamInfo {
@@ -569,7 +569,7 @@ async fn connection_loop(
                             channel_key: stream_key,
                         };
                         let (sender, receiver) = oneshot::channel();
-                        cm::modules::streaming::handlers::play(
+                        cm::modules::streaming::play(
                             identity.clone(),
                             &shared_global_state,
                             &mut network,

@@ -82,10 +82,10 @@ pub(super) async fn publish(
         instant::SystemTime::now().into(),
     )?;
     let (sender, receiver) = oneshot::channel();
-    cm::modules::streaming::handlers::publish(
+    cm::modules::streaming::publish(
         shared_global_state,
         network,
-        cm::modules::streaming::handlers::PublishStreamInfo {
+        cm::modules::streaming::PublishStreamInfo {
             record: record.clone(),
             sender,
         },

@@ -35,11 +35,11 @@ pub(super) async fn play(
     mut network: NetworkBackendClient,
 ) -> anyhow::Result<DelegatedStreamingPlayingState> {
     let (sender, receiver) = oneshot::channel();
-    cm::modules::streaming::handlers::play(
+    cm::modules::streaming::play(
         identity,
         &shared_global_state,
         &mut network,
-        cm::modules::streaming::handlers::PlayStreamInfo {
+        cm::modules::streaming::PlayStreamInfo {
             streaming_key: streaming_key.clone(),
             sender,
         },

@@ -199,10 +199,10 @@ pub async fn publish(
     });
 
     let (sender, receiver) = oneshot::channel();
-    cm::modules::streaming::handlers::publish(
+    cm::modules::streaming::publish(
         shared_global_state,
         network,
-        cm::modules::streaming::handlers::PublishStreamInfo {
+        cm::modules::streaming::PublishStreamInfo {
             record: record.clone(),
             sender,
         },
@@ -411,7 +411,7 @@ pub async fn publish(
 //     let (sender, receiver) = oneshot::channel();
 //     commands
 //         .send(ClientCommand::PublishStream(
-//             cm::streaming::handlers::PublishStreamInfo {
+//             cm::streaming::PublishStreamInfo {
 //                 record: record.clone(),
 //                 sender,
 //             },
@@ -559,10 +559,10 @@ pub async fn publish3(
 
 
     let (sender, receiver) = oneshot::channel();
-    cm::modules::streaming::handlers::publish(
+    cm::modules::streaming::publish(
         shared_global_state,
         network,
-        cm::modules::streaming::handlers::PublishStreamInfo {
+        cm::modules::streaming::PublishStreamInfo {
             record: record.clone(),
             sender,
         },
