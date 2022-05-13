@@ -25,6 +25,7 @@ use rml_rtmp::sessions::{
     ServerSession, ServerSessionConfig, ServerSessionError, ServerSessionEvent, ServerSessionResult,
 };
 use rml_rtmp::time::RtmpTimestamp;
+use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, ReadHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -128,6 +129,9 @@ async fn connection_loop(
     let (reader_sender, mut reader_receiver) = mpsc::channel::<Bytes>(10);
     let _reader_daemon_handle =
         spawn_and_log_error(connection_reader_daemon(read_stream, reader_sender));
+
+
+    let mut writer: Option<crate::media::RtmpH264ToMp4<std::io::Cursor<Vec<u8>>>> = None;
 
     loop {
         let mut next_results: Vec<ServerSessionResult> = Vec::new();
@@ -330,6 +334,33 @@ async fn connection_loop(
                         let new_results = session.accept_request(request_id)?;
                         next_results.extend(new_results);
                         source_timestamp_reference = chrono::offset::Utc::now().timestamp() as u32;
+
+
+                        // let w = writer.as_mut().unwrap();
+                        // let video_track = mp4::TrackConfig {
+                        //     language: "und".to_owned(),
+                        //     timescale: 1000,
+                        //     track_type: mp4::TrackType::Video,
+                        //     media_conf: mp4::MediaConfig::AvcConfig(mp4::AvcConfig {
+                        //         width: 1920,
+                        //         height: 1080,
+                        //         ..Default::default()
+                        //     }),
+                        // };
+                        // w.add_track(&video_track)?;
+                        // let audio_track = mp4::TrackConfig {
+                        //     language: "und".to_owned(),
+                        //     timescale: 1000,
+                        //     track_type: mp4::TrackType::Audio,
+                        //     media_conf: mp4::MediaConfig::AacConfig(mp4::AacConfig {
+                        //         bitrate: 0,
+                        //         chan_conf: mp4::ChannelConfig::Stereo,
+                        //         freq_index: mp4::SampleFreqIndex::Freq44100,
+                        //         profile: mp4::AudioObjectType::AacLowComplexity,
+                        //     }),
+                        // };
+                        // w.add_track(&audio_track)?;
+
                         state = State::Publishing {
                             app_name,
                             stream_key,
@@ -340,26 +371,68 @@ async fn connection_loop(
                     ServerSessionEvent::PublishStreamFinished {
                         app_name,
                         stream_key,
-                    } => log::info!(
-                        "ServerSessionEvent::PublishStreamFinished {} {}",
-                        app_name,
-                        stream_key
-                    ),
+                    } => {
+                        log::info!(
+                            "ServerSessionEvent::PublishStreamFinished {} {}",
+                            app_name,
+                            stream_key
+                        );
+
+                        let out_name = "/tmp/output.mp4";
+                        let mut output = File::create(out_name).await?;
+                        let w = writer.take().unwrap();
+                        let a = w.finish()?.into_inner();
+                        output.write_all(&a).await?;
+                        output.flush().await?;
+                        log::info!("Finished writing to {out_name}");
+
+                        return Ok(());
+                    }
                     ServerSessionEvent::StreamMetadataChanged {
                         app_name,
                         stream_key,
                         metadata,
-                    } => log::info!(
-                        "ServerSessionEvent::StreamMetadataChanged {} {} {:?}",
-                        app_name,
-                        stream_key,
-                        metadata
-                    ),
+                    } => {
+                        log::info!(
+                            "ServerSessionEvent::StreamMetadataChanged {} {} {:?}",
+                            app_name,
+                            stream_key,
+                            metadata
+                        );
+                        // StreamMetadata { video_width: Some(1920), video_height: Some(1080), video_codec: Some("avc1"), video_frame_rate: Some(30.0), video_bitrate_kbps: Some(5000), audio_codec: Some("mp4a"), audio_bitrate_kbps: Some(160), audio_sample_rate: Some(44100), audio_channels: Some(2), audio_is_stereo: Some(true), encoder: Some("obs-output module (libobs ...)") }
+
+                        if let (Some(fps), Some(audio_bitrate)) =
+                            (metadata.video_frame_rate, metadata.audio_bitrate_kbps)
+                        {
+                            if writer.is_some() {
+                                anyhow::bail!(
+                                    "Stream is already initialized, this is unsupported right know"
+                                );
+                            }
+                            writer = {
+                                let config = mp4::Mp4Config {
+                                    major_brand: str::parse("isom").unwrap(),
+                                    minor_version: 512,
+                                    compatible_brands: vec![str::parse("isom").unwrap()],
+                                    timescale: 1000,
+                                };
+                                let w = mp4::Mp4Writer::write_start(
+                                    std::io::Cursor::new(Vec::<u8>::new()),
+                                    &config,
+                                )?;
+                                let w =
+                                    crate::media::RtmpH264ToMp4::new(90000, fps, audio_bitrate, w);
+                                Some(w)
+                            };
+                        } else {
+                            anyhow::bail!("No fps information on metadata");
+                        }
+                    }
                     ServerSessionEvent::AudioDataReceived {
                         app_name,
                         stream_key,
                         data,
-                        timestamp: _,
+                        timestamp,
                     } => {
                         if data.len() <= 2 {
                             anyhow::bail!(
@@ -389,6 +462,10 @@ async fn connection_loop(
                             }
                             _ => {}
                         }
+
+                        let w = writer.as_mut().unwrap();
+                        w.process_audio(data, timestamp.value)?;
+
                         // let (publisher, record) = match &state {
                         //     State::Publishing {
                         //         app_name: _app_name,
@@ -474,6 +551,7 @@ async fn connection_loop(
                             }
                         };
 
+
                         // for packet in h264_processor.process(&data, timestamp.value)? {
                         //     let serialized = serialize_packet(&packet)?;
                         //     udp_socket.send(&serialized).await?;
@@ -502,6 +580,14 @@ async fn connection_loop(
                         )?;
                         publisher.feed_data(vec![streaming_data]).await?;
                         source_sequence_id += 1;
+
+
+                        let w = writer.as_mut().unwrap();
+                        w.process_video(data, timestamp.value)?;
+
+
+                        // let sample = mp4::Mp4Sample { start_time: todo!(), duration: todo!(), rendering_offset: todo!(), is_sync: todo!(), bytes: todo!() };
+                        // w.write_sample(0, );
 
                         // let rtmp_data = vec![SignedStreamingData::from(
                         //     StreamingData {
@@ -626,6 +712,14 @@ async fn connection_loop(
                         break;
                     }
                     Err(TryRecvError::Disconnected) => {
+                        let out_name = "/tmp/output.mp4";
+                        let mut output = File::create(out_name).await?;
+                        let w = writer.take().unwrap();
+                        let a = w.finish()?.into_inner();
+                        output.write_all(&a).await?;
+                        output.flush().await?;
+                        log::info!("Finished writing to {out_name}");
+
                         log::info!("EOF reading RTMP endpoint, exiting");
                         return Ok(());
                     }
@@ -758,7 +852,6 @@ fn _from_to_streaming_data_packets(
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone)]
 pub enum State {
     Waiting,
     Connected {
