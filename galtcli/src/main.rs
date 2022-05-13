@@ -57,7 +57,18 @@ async fn start_command(
         }
         None => db.get_or_create_org_keypair().await?,
     };
-    let keypair = identity::Keypair::generate_ed25519();
+    let keypair = match opt.secret_key_seed {
+        Some(seed) => {
+            let mut bytes: [u8; 32] = [0u8; 32];
+            bytes[0] = seed;
+            let secret_key = ed25519::SecretKey::from_bytes(&mut bytes).context(
+                "this returns `Err` only if the length is wrong; the length is correct; qed",
+            )?;
+            identity::Keypair::Ed25519(secret_key.into())
+        }
+        None => identity::Keypair::generate_ed25519(),
+    };
+
     let identity = protocols::NodeIdentity::new(keypair, org_keypair)?;
     info!("My public peer id is {}", identity.peer_id);
     info!("{:?}", identity.org);
